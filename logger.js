@@ -1,25 +1,37 @@
-const fs = require("fs");
-const path = require("path");
-
-const LOG_FILE = path.join(__dirname, "webhook.log");
+function safeSerialize(data) {
+    if (data == null) return undefined;
+    try {
+        // Guard log size under heavy load.
+        const str = JSON.stringify(data);
+        if (str.length > 4000) {
+            return `${str.slice(0, 4000)}...<truncated>`;
+        }
+        return JSON.parse(str);
+    } catch (err) {
+        return { serializationError: err.message };
+    }
+}
 
 function log(level, message, data = null) {
-    const timestamp = new Date().toISOString();
-    let entry = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+    const payload = {
+        ts: new Date().toISOString(),
+        level: level.toUpperCase(),
+        message,
+    };
 
-    if (data) {
-        entry += `\n  Data: ${JSON.stringify(data, null, 2)}`;
+    const serializedData = safeSerialize(data);
+    if (serializedData !== undefined) {
+        payload.data = serializedData;
     }
 
-    entry += "\n" + "-".repeat(80) + "\n";
-
-    // Print to console
-    console.log(entry);
-
-    // Append to log file
-    fs.appendFile(LOG_FILE, entry, (err) => {
-        if (err) console.error("Failed to write log:", err);
-    });
+    const line = JSON.stringify(payload);
+    if (level === "error") {
+        console.error(line);
+    } else if (level === "warn") {
+        console.warn(line);
+    } else {
+        console.log(line);
+    }
 }
 
 module.exports = {

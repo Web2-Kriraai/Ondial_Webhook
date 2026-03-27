@@ -1,22 +1,19 @@
 const logger = require("./logger");
+const { getRedis } = require("./redis");
 
 /**
- * In-memory store for call_id → { lead_id, campaign_id, contact_id } mappings.
+ * Redis-backed store for call_id → { lead_id, campaign_id, contact_id } mappings.
  *
  * Flow:
  *   t=0s    — Worker calls initiate API → gets lead_id instantly
  *   t=~1-2s — Their server POSTs { lead_id, call_id, campaign_id, contact_id } to /api/call-mapping
  *   t=~2-3s — Telephony webhooks arrive with call_id → we look up mapping here ✅
  *
- * In-memory is safe here because:
- *   - Mapping is always stored BEFORE webhooks arrive (1-2s gap)
- *   - Calls complete within minutes; no need for persistence
- *   - Auto-cleanup after 1 hour prevents memory leaks
+ * Redis is used so mapping remains shared across app instances.
+ * TTL cleanup keeps keys short-lived and memory usage bounded.
  */
 
-const mappings = new Map();   // call_id → { lead_id, campaign_id, contact_id, phone, storedAt }
-const phoneIndex = new Map(); // normalizedPhone → { lead_id, campaign_id, contact_id, storedAt }
-const TTL_MS = 60 * 60 * 1000; // 1 hour auto-cleanup
+const TTL_MS = Number(process.env.MAPPING_TTL_MS || 60 * 60 * 1000);
 
 /**
  * Normalize call_id: strip "cid_" prefix if present.
@@ -42,7 +39,7 @@ function normalizePhone(num) {
  * Store mapping: call_id → { lead_id, campaign_id, contact_id, phone }
  * Also indexes by phone so lookup works even when Asterisk changes call_id on answer.
  */
-function registerCallMapping({ lead_id, call_id, campaign_id, contact_id, phone }) {
+async function registerCallMapping({ lead_id, call_id, campaign_id, contact_id, phone }) {
     const key = normalizeCallId(call_id);
     if (!key) {
         logger.warn("[CallMapping] Invalid call_id, cannot store mapping");
@@ -57,45 +54,41 @@ function registerCallMapping({ lead_id, call_id, campaign_id, contact_id, phone 
         storedAt: Date.now()
     };
 
-    mappings.set(key, entry);
-
-    // Also index by phone for fallback lookup
-    const phoneKey = entry.phone;
-    if (phoneKey) {
-        phoneIndex.set(phoneKey, entry);
+    const redis = getRedis();
+    const payload = JSON.stringify({
+        ...entry,
+        updatedAt: Date.now(),
+    });
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(`map:call:${key}`, payload, "EX", ttlSec);
+    if (entry.phone) {
+        await redis.set(`map:phone:${entry.phone}`, payload, "EX", ttlSec);
     }
 
-    logger.info(`[CallMapping] Stored in-memory: call_id=${key} → contact_id=${contact_id} phone=${phoneKey} (total: ${mappings.size})`);
-
-    // Schedule auto-cleanup after TTL
-    setTimeout(() => {
-        if (mappings.has(key)) {
-            mappings.delete(key);
-        }
-        if (phoneKey && phoneIndex.get(phoneKey) === entry) {
-            phoneIndex.delete(phoneKey);
-        }
-        logger.info(`[CallMapping] Expired: call_id=${key}`);
-    }, TTL_MS);
+    logger.info(`[CallMapping] Stored: call_id=${key} contact_id=${contact_id} phone=${entry.phone}`);
 }
 
 /**
  * Look up mapping by call_id. Returns null if not found.
  */
-function lookupMapping(callId) {
+async function lookupMapping(callId) {
     const key = normalizeCallId(callId);
     if (!key) return null;
-    return mappings.get(key) || null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:call:${key}`);
+    return raw ? JSON.parse(raw) : null;
 }
 
 /**
  * Look up mapping by phone number (10-digit normalized).
  * Used when Asterisk assigns a different call_id on answered leg.
  */
-function lookupMappingByPhone(phone) {
+async function lookupMappingByPhone(phone) {
     const key = normalizePhone(phone);
     if (!key) return null;
-    return phoneIndex.get(key) || null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:phone:${key}`);
+    return raw ? JSON.parse(raw) : null;
 }
 
 /**
@@ -103,17 +96,23 @@ function lookupMappingByPhone(phone) {
  * Patch the phone into the existing mapping entry and add it to phoneIndex.
  * This ensures phone-based fallback works for call_answered/call_hangup.
  */
-function enrichPhoneMapping(callId, phone) {
+async function enrichPhoneMapping(callId, phone) {
     const key = normalizeCallId(callId);
     if (!key) return;
-    const entry = mappings.get(key);
+    const redis = getRedis();
+    const raw = await redis.get(`map:call:${key}`);
+    const entry = raw ? JSON.parse(raw) : null;
     if (!entry) return; // mapping not registered yet — skip
 
     const phoneKey = normalizePhone(phone);
     if (!phoneKey || entry.phone === phoneKey) return; // already set
 
     entry.phone = phoneKey;
-    phoneIndex.set(phoneKey, entry);
+    entry.updatedAt = Date.now();
+    const payload = JSON.stringify(entry);
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(`map:call:${key}`, payload, "EX", ttlSec);
+    await redis.set(`map:phone:${phoneKey}`, payload, "EX", ttlSec);
     logger.info(`[CallMapping] Phone enriched: call_id=${key} → phone=${phoneKey}`);
 }
 
