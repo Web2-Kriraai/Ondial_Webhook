@@ -1,5 +1,7 @@
 const { ObjectId } = require("mongodb");
+const crypto = require("crypto");
 const { getDb } = require("./db");
+const { getRedis } = require("./redis");
 const { lookupMapping, lookupMappingByPhone, enrichPhoneMapping, normalizeCallId } = require("./callMapping");
 const { appendCallEvent } = require("./callLogs");
 const logger = require("./logger");
@@ -13,11 +15,7 @@ const callEvents = require("./events");
  *   3 = call successfully completed
  */
 
-// ─── CDR Deduplication ───────────────────────────────────────────────────────
-// Stores Call_UniqueId values we've already processed to prevent duplicate
-// CDR events when the provider retries the same webhook hundreds of times.
-const processedCDRs = new Set();
-const CDR_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const PROCESSED_TTL_MS = Number(process.env.PROCESSED_WEBHOOK_TTL_MS || 2 * 60 * 60 * 1000);
 
 // ─── DB Update Helpers ────────────────────────────────────────────────────────
 
@@ -53,13 +51,24 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
         if (!mobile) return;
         const variants = [mobile];
         if (mobile.length === 10) variants.push(`91${mobile}`, `+91${mobile}`);
-        const result = await db.collection("contactprocessings").updateMany(
+        // Avoid broad updateMany and pick the most recent contact only.
+        const contact = await db.collection("contactprocessings").findOne(
             { mobileNumber: { $in: variants } },
+            { sort: { updatedAt: -1, _id: -1 }, projection: { _id: 1 } }
+        );
+        if (!contact?._id) {
+            logger.warn(`[Webhook] Fallback phone match found no record (${context})`, { mobile });
+            return;
+        }
+        await db.collection("contactprocessings").updateOne(
+            { _id: contact._id },
             { $set: { callReceiveStatus: newStatus, updatedAt: new Date() } }
         );
-        logger.warn(
-            `[Webhook] Fallback phone match — callReceiveStatus=${newStatus} for mobile ${mobile} matched: ${result.matchedCount} (${context})`
-        );
+        logger.warn(`[Webhook] Fallback phone match updated one contact (${context})`, {
+            mobile,
+            contactId: String(contact._id),
+            status: newStatus,
+        });
     } catch (err) {
         logger.error(`[Webhook] updateByMobile failed: ${err.message}`, { mobileRaw, context });
     }
@@ -67,19 +76,19 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
 
 /**
  * Resolve the contact from a webhook event:
- *   1. Lookup by call_id in memory map (exact match)
- *   2. Lookup by phone in memory map (handles Asterisk call_id change on answer)
- *   3. Fallback: broad DB phone scan (last resort — may match multiple contacts)
+ *   1. Lookup by call_id in Redis mapping (exact match)
+ *   2. Lookup by phone in Redis mapping (handles Asterisk call_id change on answer)
+ *   3. Fallback: DB phone scan (last resort — updates one best match)
  */
 async function updateStatus(callId, mobileRaw, newStatus, context = "") {
     // Priority 1: exact call_id mapping
-    let mapping = lookupMapping(callId);
+    let mapping = await lookupMapping(callId);
     let contact_id = mapping?.contact_id;
     let campaign_id = mapping?.campaign_id;
 
     if (!contact_id) {
         // Priority 2: phone-based mapping lookup
-        mapping = lookupMappingByPhone(mobileRaw);
+        mapping = await lookupMappingByPhone(mobileRaw);
         contact_id = mapping?.contact_id;
         campaign_id = mapping?.campaign_id;
     }
@@ -113,7 +122,7 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
 
 async function handleEventWebhook(body) {
     const { event, call_id, to, duration } = body;
-    const mapping = lookupMapping(call_id) || lookupMappingByPhone(to);
+    const mapping = (await lookupMapping(call_id)) || (await lookupMappingByPhone(to));
     const lead_id = mapping?.lead_id || null;
 
     // Always append the event to calllogs regardless of type
@@ -126,7 +135,7 @@ async function handleEventWebhook(body) {
             // subsequent call_answered/call_hangup (which may have a different
             // Asterisk call_id) can still do a precise contact lookup by phone.
             if (event === "call_initiated") {
-                enrichPhoneMapping(call_id, to);
+                await enrichPhoneMapping(call_id, to);
             }
             // Do NOT update DB — worker already sets status=1 when call is placed.
             logger.info(`[Webhook] Ignoring ${event} for call_id=${call_id} — no DB update`);
@@ -171,17 +180,14 @@ async function handleEventWebhook(body) {
 async function handleSummaryWebhook(body) {
     const { Call_UniqueId, To_number, Duration, CallStatus, RecordingURL, lead_id: cdr_lead_id } = body;
 
-    // ── Deduplication: skip if we already processed this CDR ──────────────────
-    if (Call_UniqueId && processedCDRs.has(Call_UniqueId)) {
-        logger.info(`[Webhook] Duplicate CDR skipped: Call_UniqueId=${Call_UniqueId}`);
-        return;
+    const dedupeKey = Call_UniqueId ? `cdr:${Call_UniqueId}` : null;
+    if (dedupeKey) {
+        const stored = await reserveDedupe(dedupeKey);
+        if (!stored) {
+            logger.info(`[Webhook] Duplicate CDR skipped: Call_UniqueId=${Call_UniqueId}`);
+            return;
+        }
     }
-    if (Call_UniqueId) {
-        processedCDRs.add(Call_UniqueId);
-        // Auto-remove after TTL to prevent memory growth
-        setTimeout(() => processedCDRs.delete(Call_UniqueId), CDR_TTL_MS);
-    }
-    // ─────────────────────────────────────────────────────────────────────────
 
     const dur = parseInt(Duration, 10) || 0;
 
@@ -206,7 +212,7 @@ async function handleSummaryWebhook(body) {
     }
 
     // Look up mapping first to get our lead_id; fall back to lead_id from CDR body
-    const mapping = lookupMapping(Call_UniqueId) || lookupMappingByPhone(To_number);
+    const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
 
     // Append CDR push as "cdr_push" event + update recordingUrl
@@ -218,6 +224,13 @@ async function handleSummaryWebhook(body) {
 // ─── Main Router ──────────────────────────────────────────────────────────────
 
 async function handleWebhook(body) {
+    const genericKey = `payload:${payloadHash(body)}`;
+    const stored = await reserveDedupe(genericKey);
+    if (!stored) {
+        logger.info("[Webhook] Duplicate payload skipped");
+        return;
+    }
+
     if (body.event) {
         await handleEventWebhook(body);
     } else if (body.Call_UniqueId) {
@@ -228,3 +241,14 @@ async function handleWebhook(body) {
 }
 
 module.exports = { handleWebhook };
+
+async function reserveDedupe(key) {
+    const redis = getRedis();
+    const ttlSec = Math.ceil(PROCESSED_TTL_MS / 1000);
+    const result = await redis.set(`dedupe:${key}`, "1", "EX", ttlSec, "NX");
+    return result === "OK";
+}
+
+function payloadHash(body) {
+    return crypto.createHash("sha256").update(JSON.stringify(body || {})).digest("hex");
+}

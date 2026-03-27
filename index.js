@@ -2,18 +2,20 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { connectDB } = require("./db");
-const { handleWebhook } = require("./webhookHandler");
+const { connectRedis } = require("./redis");
 const { registerCallMapping } = require("./callMapping");
 const { createCallLog } = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
+const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers } = require("./webhookQueue");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 9000;
 
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: process.env.REQUEST_BODY_LIMIT || "1mb" }));
 
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
@@ -61,11 +63,9 @@ app.post("/api/call-mapping", async (req, res) => {
     }
 
     try {
-        registerCallMapping({ lead_id, call_id, campaign_id, contact_id });
+        await registerCallMapping({ lead_id, call_id, campaign_id, contact_id });
         // Create calllogs document immediately so events can be appended as they arrive
-        createCallLog({ lead_id, call_id, campaign_id, contact_id }).catch((err) => {
-            logger.error("[CallLog] createCallLog failed", { error: err.message });
-        });
+        await createCallLog({ lead_id, call_id, campaign_id, contact_id });
     } catch (err) {
         logger.error("[CallMapping] Failed to store mapping", { error: err.message });
     }
@@ -74,6 +74,12 @@ app.post("/api/call-mapping", async (req, res) => {
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
+    if (!isWebhookAuthorized(req)) {
+        logger.warn("[Webhook] Unauthorized request", { ip: req.ip });
+        res.status(401).json({ received: false });
+        return;
+    }
+
     res.status(200).json({ received: true });
 
     const body = req.body;
@@ -82,11 +88,11 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
         method: req.method,
         url: req.originalUrl,
         ip: req.ip,
-        body,
+        payloadType: body && body.event ? "event" : body && body.Call_UniqueId ? "summary" : "unknown",
     });
 
-    handleWebhook(body).catch((err) => {
-        logger.error("Webhook handler error", { error: err.message, body });
+    enqueueWebhook(body).catch((err) => {
+        logger.error("Webhook enqueue error", { error: err.message });
     });
 });
 
@@ -99,6 +105,11 @@ app.get("/health", (req, res) => {
 async function start() {
     try {
         await connectDB();
+        await connectRedis();
+        startWebhookWorkers().catch((err) => {
+            logger.error("Failed to start webhook workers", { error: err.message });
+            process.exit(1);
+        });
         app.listen(PORT, "0.0.0.0", () => {
             logger.info(`Server started on port ${PORT}`);
         });
@@ -109,3 +120,37 @@ async function start() {
 }
 
 start();
+setupShutdownHandlers();
+
+function isWebhookAuthorized(req) {
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!secret) return true;
+
+    const header = req.headers["x-webhook-signature"];
+    if (!header || typeof header !== "string") return false;
+
+    const expected = crypto.createHmac("sha256", secret).update(JSON.stringify(req.body || {})).digest("hex");
+    return timingSafeCompare(expected, header);
+}
+
+function timingSafeCompare(a, b) {
+    const ab = Buffer.from(String(a));
+    const bb = Buffer.from(String(b));
+    if (ab.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ab, bb);
+}
+
+function setupShutdownHandlers() {
+    const shutdown = async (signal) => {
+        logger.info("Shutdown signal received", { signal });
+        try {
+            await closeWebhookWorkers();
+        } catch (err) {
+            logger.error("Error closing webhook workers", { error: err.message });
+        } finally {
+            process.exit(0);
+        }
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+}
