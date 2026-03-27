@@ -99,7 +99,7 @@ app.get("/health", (req, res) => {
 async function start() {
     try {
         await connectDB();
-        app.listen(PORT, () => {
+        app.listen(PORT, "0.0.0.0", () => {
             logger.info(`Server started on port ${PORT}`);
         });
     } catch (err) {
