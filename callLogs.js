@@ -1,6 +1,8 @@
 const { getDb } = require("./db");
 const logger = require("./logger");
 
+const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
+
 // In-process lock: tracks lead_ids currently being stub-created.
 // Prevents duplicate concurrent stub creation when multiple CDRs
 // arrive simultaneously for a lead with no existing CallLogs doc.
@@ -22,14 +24,14 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
         const db = getDb();
 
         // Step 1: Try to find existing doc by lead_id (created by AI calling system)
-        const existing = await db.collection("CallLogs").findOne({ lead_id: String(lead_id) });
+        const existing = await db.collection(CALLLOGS_COLLECTION).findOne({ lead_id: String(lead_id) });
 
         if (existing) {
             // Doc already exists — just ensure call_data.events array is initialized
             // without touching conversation.turns or any other AI-populated fields
             const needsInit = !existing.call_data || !Array.isArray(existing.call_data?.events);
             if (needsInit) {
-                await db.collection("CallLogs").updateOne(
+                await db.collection(CALLLOGS_COLLECTION).updateOne(
                     { lead_id: String(lead_id) },
                     { $set: { "call_data.events": [] } }
                 );
@@ -41,7 +43,7 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
         }
 
         // Step 2: No doc yet — create one (AI calling system may create it later)
-        await db.collection("CallLogs").updateOne(
+        await db.collection(CALLLOGS_COLLECTION).updateOne(
             { lead_id: String(lead_id) },
             {
                 $setOnInsert: {
@@ -91,21 +93,22 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             newEvent.recordingUrl = recordingUrl;
         }
 
-        // Use $push which works even if call_data.events was pre-initialized to []
-        const updateOp = {
-            $push: { "call_data.events": newEvent },
-            // $setOnInsert only runs if upsert creates a new doc — not normally needed here
-        };
-
-        // Also update recordingUrl when available (from CDR push)
+        // Schema-safe append:
+        // Ensure call_data is an object and call_data.events is an array, then append.
+        // This avoids failures when an older document has call_data in a different shape.
+        const pipeline = [
+            { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
+            { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+            { $set: { "call_data.events": { $concatArrays: ["$call_data.events", [newEvent]] } } },
+        ];
         if (recordingUrl) {
-            updateOp.$set = { recordingUrl };
+            pipeline.push({ $set: { recordingUrl } });
         }
 
         // First try: match existing doc by lead_id
-        let result = await db.collection("CallLogs").updateOne(
+        let result = await db.collection(CALLLOGS_COLLECTION).updateOne(
             { lead_id: String(lead_id) },
-            updateOp
+            pipeline
         );
 
         if (result.matchedCount === 0) {
@@ -121,7 +124,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             logger.warn(`[CallLog] No CallLogs doc for lead_id=${lead_id} — creating stub`);
 
             try {
-                await db.collection("CallLogs").updateOne(
+                await db.collection(CALLLOGS_COLLECTION).updateOne(
                     { lead_id: String(lead_id) },
                     {
                         $setOnInsert: {
@@ -148,7 +151,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             try {
                 const db = getDb();
                 // Initialize call_data.events then retry
-                await db.collection("CallLogs").updateOne(
+                await db.collection(CALLLOGS_COLLECTION).updateOne(
                     { lead_id: String(lead_id) },
                     { $set: { "call_data": { events: [] } } }
                 );
