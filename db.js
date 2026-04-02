@@ -34,7 +34,8 @@ async function ensureIndexes(database) {
         database.collection("contactprocessings").createIndex({ mobileNumber: 1 }),
         database.collection("contactprocessings").createIndex({ updatedAt: -1 }),
     ]);
-    await ensureCallLogsLeadIdIndex(database);
+    await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
+    await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
 }
 
 /**
@@ -42,8 +43,8 @@ async function ensureIndexes(database) {
  * Creating unique: true with the same key would conflict on the auto name.
  * We drop the old index when it is not unique, then create unique if data allows.
  */
-async function ensureCallLogsLeadIdIndex(database) {
-    const coll = database.collection("CallLogs");
+async function ensureCallLogsLeadIdIndex(database, collectionName) {
+    const coll = database.collection(collectionName);
     const indexes = await coll.indexes();
 
     const leadIdx = indexes.find((i) => {
@@ -54,11 +55,12 @@ async function ensureCallLogsLeadIdIndex(database) {
     if (leadIdx && !leadIdx.unique) {
         try {
             await coll.dropIndex(leadIdx.name);
-            logger.info("[DB] Dropped non-unique CallLogs index to replace with unique", {
+            logger.info("[DB] Dropped non-unique lead_id index to replace with unique", {
                 name: leadIdx.name,
+                collectionName,
             });
         } catch (err) {
-            logger.warn("[DB] Could not drop CallLogs lead_id index", { error: err.message });
+            logger.warn("[DB] Could not drop lead_id index", { error: err.message, collectionName });
         }
     }
 
@@ -68,7 +70,7 @@ async function ensureCallLogsLeadIdIndex(database) {
 
     try {
         await coll.createIndex({ lead_id: 1 }, { unique: true });
-        logger.info("[DB] CallLogs unique index on lead_id ensured");
+        logger.info("[DB] Unique index on lead_id ensured", { collectionName });
     } catch (err) {
         const msg = String(err.message || "");
         const dupData =
@@ -79,15 +81,15 @@ async function ensureCallLogsLeadIdIndex(database) {
 
         if (dupData) {
             logger.warn(
-                "[DB] CallLogs has duplicate lead_id values; cannot use unique index — creating non-unique index",
-                { error: msg }
+                "[DB] Duplicate lead_id values; cannot use unique index — creating non-unique index",
+                { error: msg, collectionName }
             );
             await coll.createIndex({ lead_id: 1 });
             return;
         }
 
         if (err.code === 85 || /IndexOptionsConflict|already exists/i.test(msg)) {
-            logger.info("[DB] CallLogs lead_id index already present", { message: msg });
+            logger.info("[DB] lead_id index already present", { message: msg, collectionName });
             return;
         }
 

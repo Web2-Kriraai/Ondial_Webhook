@@ -124,9 +124,10 @@ async function handleEventWebhook(body) {
     const { event, call_id, to, duration } = body;
     const mapping = (await lookupMapping(call_id)) || (await lookupMappingByPhone(to));
     const lead_id = mapping?.lead_id || null;
+    const contact_id = mapping?.contact_id || null;
 
     // Always append the event to calllogs regardless of type
-    await appendCallEvent(lead_id, event, body);
+    await appendCallEvent(lead_id, event, body, null, { contact_id });
 
     switch (event) {
         case "call_initiated":
@@ -214,9 +215,10 @@ async function handleSummaryWebhook(body) {
     // Look up mapping first to get our lead_id; fall back to lead_id from CDR body
     const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
+    const contact_id = mapping?.contact_id || null;
 
     // Append CDR push as "cdr_push" event + update recordingUrl
-    await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null);
+    await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id });
 
     await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`);
 }

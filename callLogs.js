@@ -2,6 +2,14 @@ const { getDb } = require("./db");
 const logger = require("./logger");
 
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
+const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
+
+function resolveCollection({ contact_id }) {
+    if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
+        return TESTCALL_COLLECTION;
+    }
+    return CALLLOGS_COLLECTION;
+}
 
 // In-process lock: tracks lead_ids currently being stub-created.
 // Prevents duplicate concurrent stub creation when multiple CDRs
@@ -22,16 +30,17 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
     if (!lead_id) return;
     try {
         const db = getDb();
+        const collectionName = resolveCollection({ contact_id });
 
         // Step 1: Try to find existing doc by lead_id (created by AI calling system)
-        const existing = await db.collection(CALLLOGS_COLLECTION).findOne({ lead_id: String(lead_id) });
+        const existing = await db.collection(collectionName).findOne({ lead_id: String(lead_id) });
 
         if (existing) {
             // Doc already exists — just ensure call_data.events array is initialized
             // without touching conversation.turns or any other AI-populated fields
             const needsInit = !existing.call_data || !Array.isArray(existing.call_data?.events);
             if (needsInit) {
-                await db.collection(CALLLOGS_COLLECTION).updateOne(
+                await db.collection(collectionName).updateOne(
                     { lead_id: String(lead_id) },
                     { $set: { "call_data.events": [] } }
                 );
@@ -43,7 +52,7 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
         }
 
         // Step 2: No doc yet — create one (AI calling system may create it later)
-        await db.collection(CALLLOGS_COLLECTION).updateOne(
+        await db.collection(collectionName).updateOne(
             { lead_id: String(lead_id) },
             {
                 $setOnInsert: {
@@ -76,11 +85,12 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
  * @param {object} eventData    - raw webhook body
  * @param {string} [recordingUrl] - if provided, also update recordingUrl field
  */
-async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = null) {
+async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = null, options = {}) {
     if (!lead_id) return;
 
     try {
         const db = getDb();
+        const collectionName = options.collectionName || resolveCollection({ contact_id: options.contact_id });
 
         const newEvent = {
             timestamp:  new Date().toISOString(),
@@ -106,7 +116,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
         }
 
         // First try: match existing doc by lead_id
-        let result = await db.collection(CALLLOGS_COLLECTION).updateOne(
+        let result = await db.collection(collectionName).updateOne(
             { lead_id: String(lead_id) },
             pipeline
         );
@@ -124,7 +134,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             logger.warn(`[CallLog] No CallLogs doc for lead_id=${lead_id} — creating stub`);
 
             try {
-                await db.collection(CALLLOGS_COLLECTION).updateOne(
+                await db.collection(collectionName).updateOne(
                     { lead_id: String(lead_id) },
                     {
                         $setOnInsert: {
@@ -151,11 +161,11 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             try {
                 const db = getDb();
                 // Initialize call_data.events then retry
-                await db.collection(CALLLOGS_COLLECTION).updateOne(
+                await db.collection(collectionName).updateOne(
                     { lead_id: String(lead_id) },
                     { $set: { "call_data": { events: [] } } }
                 );
-                await appendCallEvent(lead_id, event_type, eventData, recordingUrl);
+                await appendCallEvent(lead_id, event_type, eventData, recordingUrl, options);
             } catch (retryErr) {
                 logger.error(`[CallLog] appendCallEvent retry failed: ${retryErr.message}`, { lead_id, event_type });
             }
