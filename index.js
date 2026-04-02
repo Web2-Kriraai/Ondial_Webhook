@@ -8,6 +8,7 @@ const { createCallLog } = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers } = require("./webhookQueue");
+const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const crypto = require("crypto");
 
 const app = express();
@@ -59,6 +60,15 @@ app.post("/api/call-mapping", async (req, res) => {
 
     if (!call_id || !contact_id) {
         logger.warn("[CallMapping] Missing call_id or contact_id — skipping", req.body);
+        await logMissingCallMapping({
+            source: "call_mapping_endpoint",
+            reason: "missing_call_id_or_contact_id",
+            lead_id: lead_id ?? null,
+            call_id: call_id ?? null,
+            contact_id: contact_id ?? null,
+            campaign_id: campaign_id ?? null,
+            body_preview: previewPayload(req.body),
+        });
         return;
     }
 

@@ -4,6 +4,7 @@ const { getDb } = require("./db");
 const { getRedis } = require("./redis");
 const { lookupMapping, lookupMappingByPhone, enrichPhoneMapping, normalizeCallId } = require("./callMapping");
 const { appendCallEvent } = require("./callLogs");
+const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
 
@@ -120,11 +121,27 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
 
 // ─── Event Webhook Handler ────────────────────────────────────────────────────
 
+function hasLeadId(v) {
+    return v != null && String(v).trim() !== "";
+}
+
 async function handleEventWebhook(body) {
     const { event, call_id, to, duration } = body;
     const mapping = (await lookupMapping(call_id)) || (await lookupMappingByPhone(to));
     const lead_id = mapping?.lead_id || null;
     const contact_id = mapping?.contact_id || null;
+
+    if (!hasLeadId(lead_id)) {
+        await logMissingCallMapping({
+            source: "event_webhook",
+            reason: "no_lead_id_after_redis_lookup",
+            event: event || null,
+            call_id: call_id || null,
+            to: to || null,
+            contact_id_from_mapping: contact_id,
+            body_preview: previewPayload(body),
+        });
+    }
 
     // Always append the event to calllogs regardless of type
     await appendCallEvent(lead_id, event, body, null, { contact_id });
@@ -216,6 +233,17 @@ async function handleSummaryWebhook(body) {
     const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
     const contact_id = mapping?.contact_id || null;
+
+    if (!hasLeadId(lead_id)) {
+        await logMissingCallMapping({
+            source: "summary_webhook",
+            reason: "no_lead_id_mapping_or_cdr_body",
+            call_unique_id: Call_UniqueId || null,
+            to_number: To_number || null,
+            contact_id_from_mapping: contact_id,
+            body_preview: previewPayload(body),
+        });
+    }
 
     // Append CDR push as "cdr_push" event + update recordingUrl
     await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id });
