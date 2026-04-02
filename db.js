@@ -33,6 +33,10 @@ async function ensureIndexes(database) {
     await Promise.all([
         database.collection("contactprocessings").createIndex({ mobileNumber: 1 }),
         database.collection("contactprocessings").createIndex({ updatedAt: -1 }),
+        database.collection(process.env.ERRORLOG_COLLECTION || "ErrorLog").createIndex({ createdAt: -1 }),
+        database
+            .collection(process.env.ERRORLOG_COLLECTION || "ErrorLog")
+            .createIndex({ type: 1, createdAt: -1 }),
     ]);
     await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
@@ -45,7 +49,18 @@ async function ensureIndexes(database) {
  */
 async function ensureCallLogsLeadIdIndex(database, collectionName) {
     const coll = database.collection(collectionName);
-    const indexes = await coll.indexes();
+    let indexes;
+    try {
+        indexes = await coll.indexes();
+    } catch (err) {
+        // Collection does not exist yet (no documents) — create empty namespace for indexes.
+        if (err.code === 26 || /ns does not exist/i.test(String(err.message || ""))) {
+            await database.createCollection(collectionName);
+            indexes = await coll.indexes();
+        } else {
+            throw err;
+        }
+    }
 
     const leadIdx = indexes.find((i) => {
         const k = i.key || {};
