@@ -4,11 +4,12 @@ const cors = require("cors");
 const { connectDB } = require("./db");
 const { connectRedis } = require("./redis");
 const { registerCallMapping } = require("./callMapping");
-const { createCallLog } = require("./callLogs");
+const { createCallLog, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
+const { resolveInboundContact } = require("./inboundMapping");
 const crypto = require("crypto");
 
 const app = express();
@@ -100,6 +101,80 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
         logger.error("Webhook enqueue error", { error: err.message });
     });
 });
+
+// Inbound: { call_type, call_id, from_number, to_number, campaign_id }
+app.post("/api/inbound-mapping", async (req, res) => {
+    res.status(200).json({ received: true });
+
+    const { call_type, call_id, from_number, to_number, campaign_id } = req.body;
+
+    logger.info("Inbound mapping received", {
+        call_type,
+        call_id,
+        from_number,
+        to_number,
+        campaign_id,
+    });
+
+    if (call_type != null && String(call_type).toLowerCase() !== "inbound") {
+        logger.info("[InboundMapping] Skipping — not an inbound call_type", { call_type });
+        return;
+    }
+
+    if (!call_id || !campaign_id || !from_number) {
+        logger.warn("[InboundMapping] Missing call_id, campaign_id, or from_number — skipping", req.body);
+        await logMissingCallMapping({
+            source: "inbound_mapping_endpoint",
+            reason: "missing_call_id_campaign_or_from_number",
+            body_preview: previewPayload(req.body),
+        });
+        return;
+    }
+
+    try {
+        const resolved = await resolveInboundContact({ from_number, campaign_id });
+        if (!resolved) {
+            logger.warn("[InboundMapping] No contactprocessings match for from_number + campaign_id", {
+                from_number,
+                campaign_id,
+            });
+            await logMissingCallMapping({
+                source: "inbound_mapping_endpoint",
+                reason: "no_contact_for_caller_and_campaign",
+                call_id,
+                from_number,
+                to_number: to_number ?? null,
+                campaign_id,
+                body_preview: previewPayload(req.body),
+            });
+            return;
+        }
+
+        await registerCallMapping({
+            lead_id: resolved.lead_id,
+            call_id,
+            campaign_id,
+            contact_id: resolved.contact_id,
+            phone: resolved.normalizedPhone,
+            collectionName: INBOUNDCALLLOG_COLLECTION,
+        });
+        await createCallLog({
+            lead_id: resolved.lead_id,
+            call_id,
+            campaign_id,
+            contact_id: resolved.contact_id,
+            collectionName: INBOUNDCALLLOG_COLLECTION,
+        });
+        logger.info("[InboundMapping] Stored mapping", {
+            call_id,
+            contact_id: resolved.contact_id,
+            lead_id: resolved.lead_id,
+        });
+    } catch (err) {
+        logger.error("[InboundMapping] Failed to store mapping", { error: err.message });
+    }
+});
+
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {

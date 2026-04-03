@@ -130,6 +130,7 @@ async function handleEventWebhook(body) {
     const mapping = (await lookupMapping(call_id)) || (await lookupMappingByPhone(to));
     const lead_id = mapping?.lead_id || null;
     const contact_id = mapping?.contact_id || null;
+    const collectionName = mapping?.collectionName || null;
 
     if (!hasLeadId(lead_id)) {
         await logMissingCallMapping({
@@ -144,7 +145,7 @@ async function handleEventWebhook(body) {
     }
 
     // Always append the event to calllogs regardless of type
-    await appendCallEvent(lead_id, event, body, null, { contact_id });
+    await appendCallEvent(lead_id, event, body, null, { contact_id, collectionName });
 
     switch (event) {
         case "call_initiated":
@@ -233,6 +234,7 @@ async function handleSummaryWebhook(body) {
     const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
     const contact_id = mapping?.contact_id || null;
+    const collectionName = mapping?.collectionName || null;
 
     if (!hasLeadId(lead_id)) {
         await logMissingCallMapping({
@@ -246,7 +248,7 @@ async function handleSummaryWebhook(body) {
     }
 
     // Append CDR push as "cdr_push" event + update recordingUrl
-    await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id });
+    await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
 
     await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`);
 }

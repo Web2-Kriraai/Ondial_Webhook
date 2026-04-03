@@ -3,6 +3,7 @@ const logger = require("./logger");
 
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
+const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundCallLog";
 
 function resolveCollection({ contact_id }) {
     if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
@@ -26,11 +27,11 @@ const pendingStubs = new Set();
  *   1. lead_id (our primary key — reliable)
  *   2. contact_id fallback (in case AI system stored differently)
  */
-async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
+async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collectionName: explicitCollection }) {
     if (!lead_id) return;
     try {
         const db = getDb();
-        const collectionName = resolveCollection({ contact_id });
+        const collectionName = explicitCollection || resolveCollection({ contact_id });
 
         // Step 1: Try to find existing doc by lead_id (created by AI calling system)
         const existing = await db.collection(collectionName).findOne({ lead_id: String(lead_id) });
@@ -88,9 +89,12 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id }) {
 async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = null, options = {}) {
     if (!lead_id) return;
 
+    const resolvedCollectionName =
+        options.collectionName || resolveCollection({ contact_id: options.contact_id });
+
     try {
         const db = getDb();
-        const collectionName = options.collectionName || resolveCollection({ contact_id: options.contact_id });
+        const collectionName = resolvedCollectionName;
 
         const newEvent = {
             timestamp:  new Date().toISOString(),
@@ -127,7 +131,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             // creating the stub, wait briefly and retry instead of also logging.
             if (pendingStubs.has(String(lead_id))) {
                 await new Promise(r => setTimeout(r, 250));
-                return appendCallEvent(lead_id, event_type, eventData, recordingUrl);
+                return appendCallEvent(lead_id, event_type, eventData, recordingUrl, options);
             }
 
             pendingStubs.add(String(lead_id));
@@ -161,7 +165,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             try {
                 const db = getDb();
                 // Initialize call_data.events then retry
-                await db.collection(collectionName).updateOne(
+                await db.collection(resolvedCollectionName).updateOne(
                     { lead_id: String(lead_id) },
                     { $set: { "call_data": { events: [] } } }
                 );
@@ -175,4 +179,4 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
     }
 }
 
-module.exports = { createCallLog, appendCallEvent };
+module.exports = { createCallLog, appendCallEvent, INBOUNDCALLLOG_COLLECTION };
