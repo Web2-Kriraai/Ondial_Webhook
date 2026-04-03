@@ -3,7 +3,7 @@ const logger = require("./logger");
 
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
-const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundCallLog";
+const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation";
 
 function resolveCollection({ contact_id }) {
     if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {

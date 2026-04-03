@@ -40,7 +40,7 @@ async function ensureIndexes(database) {
     ]);
     await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
-    await ensureCallLogsLeadIdIndex(database, process.env.INBOUNDCALLLOG_COLLECTION || "InboundCallLog");
+    await ensureCallLogsLeadIdIndex(database, process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation");
 }
 
 /**
