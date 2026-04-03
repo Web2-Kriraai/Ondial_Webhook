@@ -20,21 +20,49 @@ const PROCESSED_TTL_MS = Number(process.env.PROCESSED_WEBHOOK_TTL_MS || 2 * 60 *
 
 // ─── DB Update Helpers ────────────────────────────────────────────────────────
 
+function isMongoObjectIdString(s) {
+    return typeof s === "string" && /^[a-fA-F0-9]{24}$/.test(s);
+}
+
+/**
+ * Test / direct-dial flows use synthetic ids like "direct_9408645627" — not valid ObjectIds.
+ * Resolve embedded digits as phone and update via mobile lookup.
+ */
 async function updateByContactId(contactId, newStatus, context = "") {
-    try {
-        const db = getDb();
-        const result = await db.collection("contactprocessings").updateOne(
-            { _id: new ObjectId(contactId) },
-            { $set: { callReceiveStatus: newStatus, updatedAt: new Date() } }
-        );
-        if (result.matchedCount === 0) {
-            logger.warn(`[Webhook] No contact found for contact_id=${contactId} (${context})`);
-        } else {
-            logger.info(`[Webhook] callReceiveStatus=${newStatus} for contact_id=${contactId} (${context})`);
+    if (contactId == null || String(contactId).trim() === "") return;
+
+    const cid = String(contactId);
+
+    if (isMongoObjectIdString(cid)) {
+        try {
+            const db = getDb();
+            const result = await db.collection("contactprocessings").updateOne(
+                { _id: new ObjectId(cid) },
+                { $set: { callReceiveStatus: newStatus, updatedAt: new Date() } }
+            );
+            if (result.matchedCount === 0) {
+                logger.warn(`[Webhook] No contact found for contact_id=${cid} (${context})`);
+            } else {
+                logger.info(`[Webhook] callReceiveStatus=${newStatus} for contact_id=${cid} (${context})`);
+            }
+        } catch (err) {
+            logger.error(`[Webhook] updateByContactId failed: ${err.message}`, { contactId: cid, context });
         }
-    } catch (err) {
-        logger.error(`[Webhook] updateByContactId failed: ${err.message}`, { contactId, context });
+        return;
     }
+
+    if (cid.startsWith("direct_")) {
+        const digits = cid.slice("direct_".length).replace(/\D/g, "");
+        if (digits) {
+            await updateByMobile(digits, newStatus, `${context} [direct_contact_id]`);
+            return;
+        }
+    }
+
+    logger.warn(`[Webhook] Skipping callReceiveStatus — contact_id is not an ObjectId`, {
+        contactId: cid,
+        context,
+    });
 }
 
 function normalizeMobile(num) {
