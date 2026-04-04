@@ -3,13 +3,12 @@ const express = require("express");
 const cors = require("cors");
 const { connectDB } = require("./db");
 const { connectRedis } = require("./redis");
-const { registerCallMapping } = require("./callMapping");
+const { registerCallMapping, normalizePhone } = require("./callMapping");
 const { createCallLog, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
-const { resolveInboundMapping } = require("./inboundMapping");
 const crypto = require("crypto");
 
 const app = express();
@@ -102,31 +101,18 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
     });
 });
 
-// Inbound: call_id + campaign_id required; identify contact via contact_id and/or lead_id and/or from_number
+// Inbound: tie webhooks to Mongo by normalized call_id only (no contactprocessings lookup).
+// Optional body fields: campaign_id, contact_id, from_number (phone index + CRM updates if set).
 app.post("/api/inbound-mapping", async (req, res) => {
     res.status(200).json({ received: true });
 
-    const {
-        call_type,
-        call_id,
-        from_number,
-        to_number,
-        campaign_id,
-        lead_id,
-        contact_id,
-    } = req.body;
-
-    const hasContactId = contact_id != null && String(contact_id).trim() !== "";
-    const hasFrom = from_number != null && String(from_number).trim() !== "";
-    const hasLead = lead_id != null && String(lead_id).trim() !== "";
+    const { call_type, call_id, from_number, campaign_id, contact_id } = req.body;
 
     logger.info("Inbound mapping received", {
         call_type,
         call_id,
         campaign_id,
-        hasContactId,
-        hasFrom,
-        hasLead,
+        has_contact_id: contact_id != null && String(contact_id).trim() !== "",
     });
 
     if (call_type != null && String(call_type).toLowerCase() !== "inbound") {
@@ -134,60 +120,38 @@ app.post("/api/inbound-mapping", async (req, res) => {
         return;
     }
 
-    if (!call_id || !campaign_id || (!hasContactId && !hasFrom && !hasLead)) {
-        logger.warn(
-            "[InboundMapping] Missing call_id, campaign_id, or any of contact_id / from_number / lead_id — skipping",
-            req.body
-        );
+    if (!call_id || String(call_id).trim() === "") {
+        logger.warn("[InboundMapping] Missing call_id — skipping", req.body);
         await logMissingCallMapping({
             source: "inbound_mapping_endpoint",
-            reason: "missing_call_id_campaign_or_identity",
+            reason: "missing_call_id",
             body_preview: previewPayload(req.body),
         });
         return;
     }
 
-    try {
-        const resolved = await resolveInboundMapping({
-            lead_id,
-            contact_id,
-            from_number,
-            campaign_id,
-        });
-        if (!resolved) {
-            logger.warn("[InboundMapping] No contactprocessings match for from_number + campaign_id", {
-                from_number,
-                campaign_id,
-            });
-            await logMissingCallMapping({
-                source: "inbound_mapping_endpoint",
-                reason: "no_contact_for_caller_and_campaign",
-                call_id,
-                from_number,
-                to_number: to_number ?? null,
-                campaign_id,
-                body_preview: previewPayload(req.body),
-            });
-            return;
-        }
+    const cid =
+        contact_id != null && String(contact_id).trim() !== "" ? String(contact_id).trim() : "";
+    const camp = campaign_id != null ? String(campaign_id) : "";
 
+    try {
         await registerCallMapping({
             lead_id: "",
             call_id,
-            campaign_id,
-            contact_id: resolved.contact_id,
-            phone: resolved.normalizedPhone,
+            campaign_id: camp,
+            contact_id: cid,
+            phone: normalizePhone(from_number) || "",
             collectionName: INBOUNDCALLLOG_COLLECTION,
         });
         await createCallLog({
             call_id,
-            campaign_id,
-            contact_id: resolved.contact_id,
+            campaign_id: camp,
+            contact_id: cid,
             collectionName: INBOUNDCALLLOG_COLLECTION,
         });
-        logger.info("[InboundMapping] Stored mapping", {
+        logger.info("[InboundMapping] Stored mapping (call_id → inbound log)", {
             call_id,
-            contact_id: resolved.contact_id,
+            contact_id: cid || "(none)",
         });
     } catch (err) {
         logger.error("[InboundMapping] Failed to store mapping", { error: err.message });

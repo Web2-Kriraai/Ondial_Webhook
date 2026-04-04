@@ -107,26 +107,27 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
  * Resolve the contact from a webhook event:
  *   1. Lookup by call_id in Redis mapping (exact match)
  *   2. Lookup by phone in Redis mapping (handles Asterisk call_id change on answer)
- *   3. Fallback: DB phone scan (last resort — updates one best match)
+ *      — skipped when step 1 already resolved an inbound log mapping (avoid wrong merge)
+ *   3. Fallback: DB phone scan (last resort — outbound only; never for inbound-only mapping)
  */
 async function updateStatus(callId, mobileRaw, newStatus, context = "") {
-    // Priority 1: exact call_id mapping
     let mapping = await lookupMapping(callId);
-    let contact_id = mapping?.contact_id;
-    let campaign_id = mapping?.campaign_id;
+    const inboundByCallId = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
 
-    if (!contact_id) {
-        // Priority 2: phone-based mapping lookup
-        mapping = await lookupMappingByPhone(mobileRaw);
-        contact_id = mapping?.contact_id;
-        campaign_id = mapping?.campaign_id;
+    if (!mapping?.contact_id && mobileRaw && !inboundByCallId) {
+        const byPhone = await lookupMappingByPhone(mobileRaw);
+        if (byPhone) mapping = byPhone;
     }
+
+    const contact_id = mapping?.contact_id;
+    const campaign_id = mapping?.campaign_id;
+    const isInboundMapping = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
 
     if (contact_id) {
         await updateByContactId(contact_id, newStatus, context);
-        if (campaign_id) {
+        if (campaign_id || isInboundMapping) {
             callEvents.emit("call_update", {
-                campaign_id,
+                campaign_id: campaign_id || null,
                 call_id: callId,
                 contact_id,
                 status: newStatus,
@@ -136,7 +137,17 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
         return;
     }
 
-    // Priority 3: broad DB scan (last resort)
+    if (isInboundMapping) {
+        callEvents.emit("call_update", {
+            campaign_id: campaign_id || null,
+            call_id: callId,
+            contact_id: null,
+            status: newStatus,
+            timestamp: new Date().toISOString()
+        });
+        return;
+    }
+
     logger.warn(`[Webhook] No mapping for call_id=${normalizeCallId(callId)} — falling back to broad phone match`);
     await updateByMobile(mobileRaw, newStatus, context);
 
