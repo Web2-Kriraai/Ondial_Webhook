@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const { getDb } = require("./db");
 const { getRedis } = require("./redis");
 const { lookupMapping, lookupMappingByPhone, enrichPhoneMapping, normalizeCallId } = require("./callMapping");
-const { appendCallEvent } = require("./callLogs");
+const { appendCallEvent, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
@@ -159,8 +159,9 @@ async function handleEventWebhook(body) {
     const lead_id = mapping?.lead_id || null;
     const contact_id = mapping?.contact_id || null;
     const collectionName = mapping?.collectionName || null;
+    const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
 
-    if (!hasLeadId(lead_id)) {
+    if (!hasLeadId(lead_id) && !isInboundLog) {
         await logMissingCallMapping({
             source: "event_webhook",
             reason: "no_lead_id_after_redis_lookup",
@@ -172,8 +173,20 @@ async function handleEventWebhook(body) {
         });
     }
 
-    // Always append the event to calllogs regardless of type
-    await appendCallEvent(lead_id, event, body, null, { contact_id, collectionName });
+    const docKey = normalizeCallId(call_id);
+    if (isInboundLog) {
+        if (docKey) {
+            await appendCallEvent(docKey, event, body, null, {
+                contact_id,
+                collectionName,
+                callId: docKey,
+            });
+        } else {
+            logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
+        }
+    } else {
+        await appendCallEvent(lead_id, event, body, null, { contact_id, collectionName });
+    }
 
     switch (event) {
         case "call_initiated":
@@ -263,8 +276,10 @@ async function handleSummaryWebhook(body) {
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
     const contact_id = mapping?.contact_id || null;
     const collectionName = mapping?.collectionName || null;
+    const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
+    const cdrCallKey = normalizeCallId(Call_UniqueId);
 
-    if (!hasLeadId(lead_id)) {
+    if (!hasLeadId(lead_id) && !(isInboundLog && cdrCallKey)) {
         await logMissingCallMapping({
             source: "summary_webhook",
             reason: "no_lead_id_mapping_or_cdr_body",
@@ -275,8 +290,15 @@ async function handleSummaryWebhook(body) {
         });
     }
 
-    // Append CDR push as "cdr_push" event + update recordingUrl
-    await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
+    if (isInboundLog && cdrCallKey) {
+        await appendCallEvent(cdrCallKey, "cdr_push", body, RecordingURL || null, {
+            contact_id,
+            collectionName,
+            callId: cdrCallKey,
+        });
+    } else {
+        await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
+    }
 
     await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`);
 }

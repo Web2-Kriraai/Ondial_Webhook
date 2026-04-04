@@ -33,6 +33,7 @@ async function ensureIndexes(database) {
     await Promise.all([
         database.collection("contactprocessings").createIndex({ mobileNumber: 1 }),
         database.collection("contactprocessings").createIndex({ updatedAt: -1 }),
+        database.collection("contactprocessings").createIndex({ lead_id: 1, campaign_id: 1 }),
         database.collection(process.env.ERRORLOG_COLLECTION || "ErrorLog").createIndex({ createdAt: -1 }),
         database
             .collection(process.env.ERRORLOG_COLLECTION || "ErrorLog")
@@ -40,7 +41,10 @@ async function ensureIndexes(database) {
     ]);
     await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
-    await ensureCallLogsLeadIdIndex(database, process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation");
+    await ensureInboundCallLogIndexByCallId(
+        database,
+        process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation"
+    );
 }
 
 /**
@@ -106,6 +110,71 @@ async function ensureCallLogsLeadIdIndex(database, collectionName) {
 
         if (err.code === 85 || /IndexOptionsConflict|already exists/i.test(msg)) {
             logger.info("[DB] lead_id index already present", { message: msg, collectionName });
+            return;
+        }
+
+        throw err;
+    }
+}
+
+/** Inbound logs are keyed by call_id (string), not lead_id. */
+async function ensureInboundCallLogIndexByCallId(database, collectionName) {
+    const coll = database.collection(collectionName);
+    let indexes;
+    try {
+        indexes = await coll.indexes();
+    } catch (err) {
+        if (err.code === 26 || /ns does not exist/i.test(String(err.message || ""))) {
+            await database.createCollection(collectionName);
+            indexes = await coll.indexes();
+        } else {
+            throw err;
+        }
+    }
+
+    const callIdx = indexes.find((i) => {
+        const k = i.key || {};
+        return Object.keys(k).length === 1 && k.call_id === 1;
+    });
+
+    if (callIdx && !callIdx.unique) {
+        try {
+            await coll.dropIndex(callIdx.name);
+            logger.info("[DB] Dropped non-unique call_id index to replace with unique", {
+                name: callIdx.name,
+                collectionName,
+            });
+        } catch (err) {
+            logger.warn("[DB] Could not drop call_id index", { error: err.message, collectionName });
+        }
+    }
+
+    if (callIdx && callIdx.unique) {
+        return;
+    }
+
+    try {
+        await coll.createIndex({ call_id: 1 }, { unique: true });
+        logger.info("[DB] Unique index on call_id ensured (inbound)", { collectionName });
+    } catch (err) {
+        const msg = String(err.message || "");
+        const dupData =
+            err.code === 11000 ||
+            /duplicate key/i.test(msg) ||
+            /E11000/i.test(msg) ||
+            /duplicate key value/i.test(msg);
+
+        if (dupData) {
+            logger.warn(
+                "[DB] Duplicate call_id values; cannot use unique index — creating non-unique index",
+                { error: msg, collectionName }
+            );
+            await coll.createIndex({ call_id: 1 });
+            return;
+        }
+
+        if (err.code === 85 || /IndexOptionsConflict|already exists/i.test(msg)) {
+            logger.info("[DB] call_id index already present", { message: msg, collectionName });
             return;
         }
 
