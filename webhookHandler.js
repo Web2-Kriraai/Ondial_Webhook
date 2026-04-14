@@ -193,7 +193,6 @@ async function handleEventWebhook(body) {
                 collectionName,
                 callId: docKey,
             });
-            await notifyOndialInboundWebhook(docKey);
         } else {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
         }
@@ -234,6 +233,10 @@ async function handleEventWebhook(body) {
             } else {
                 // Call went out (rang) but user didn't answer — status=1
                 await updateStatus(call_id, to, 1, `${event} no-answer duration=0`);
+            }
+            // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
+            if (isInboundLog && docKey) {
+                await notifyOndialInboundWebhook(docKey);
             }
             break;
         }
