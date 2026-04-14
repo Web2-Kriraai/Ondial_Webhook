@@ -7,6 +7,7 @@ const { appendCallEvent, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
+const { notifyOndialInboundWebhook } = require("./inboundNotify");
 
 /**
  * callReceiveStatus values:
@@ -192,6 +193,7 @@ async function handleEventWebhook(body) {
                 collectionName,
                 callId: docKey,
             });
+            await notifyOndialInboundWebhook(docKey);
         } else {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
         }
@@ -307,6 +309,7 @@ async function handleSummaryWebhook(body) {
             collectionName,
             callId: cdrCallKey,
         });
+        await notifyOndialInboundWebhook(cdrCallKey);
     } else {
         await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
     }
