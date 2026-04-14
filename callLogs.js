@@ -52,12 +52,11 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                     $setOnInsert: {
                         call_id: key,
                         contact_id: String(contact_id || ""),
-                        campaign_id: String(campaign_id || ""),
+                        config_id: String(campaign_id || ""),
                         call_direction: "inbound",
                         createdAt: new Date().toISOString(),
                         recordingUrl: "",
                         call_data: { events: [] },
-                        conversation: { turns: [] },
                     },
                 },
                 { upsert: true }
@@ -95,7 +94,6 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                     createdAt: new Date().toISOString(),
                     recordingUrl: "",
                     call_data: { events: [] },
-                    conversation: { turns: [] },
                 },
             },
             { upsert: true }
