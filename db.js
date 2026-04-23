@@ -48,9 +48,9 @@ async function ensureIndexes(database) {
 }
 
 /**
- * CallLogs may already have a non-unique index { lead_id: 1 } named "lead_id_1".
- * Creating unique: true with the same key would conflict on the auto name.
- * We drop the old index when it is not unique, then create unique if data allows.
+ * Ensure uniqueness only for meaningful lead_id values.
+ * Historical rows may contain null/empty lead_id; partial unique index avoids
+ * startup failures caused by duplicate nulls.
  */
 async function ensureCallLogsLeadIdIndex(database, collectionName) {
     const coll = database.collection(collectionName);
@@ -67,12 +67,39 @@ async function ensureCallLogsLeadIdIndex(database, collectionName) {
         }
     }
 
-    const leadIdx = indexes.find((i) => {
+    const leadIndexes = indexes.filter((i) => {
         const k = i.key || {};
         return Object.keys(k).length === 1 && k.lead_id === 1;
     });
+    const hasUsableUniqueLeadIdx = leadIndexes.some((i) => i.unique === true);
+    const hasNonUniqueLeadIdx = leadIndexes.some((i) => i.unique !== true);
 
-    if (leadIdx && !leadIdx.unique) {
+    // IMPORTANT:
+    // If non-empty lead_id duplicates exist, keep/use a non-unique index and
+    // skip unique-index attempts to avoid repeated startup failures.
+    const duplicateLeadRows = await coll
+        .aggregate([
+            { $match: { lead_id: { $type: "string", $gt: "" } } },
+            { $group: { _id: "$lead_id", count: { $sum: 1 } } },
+            { $match: { count: { $gt: 1 } } },
+            { $limit: 1 },
+        ])
+        .toArray();
+    const duplicateLead = duplicateLeadRows[0]?._id;
+    if (duplicateLead) {
+        if (!hasNonUniqueLeadIdx) {
+            await coll.createIndex({ lead_id: 1 }, { name: "lead_id_nonunique_fallback" });
+        }
+        logger.info(
+            "[DB] Duplicate non-empty lead_id detected; using non-unique lead_id index",
+            { collectionName, sampleLeadId: String(duplicateLead) }
+        );
+        return;
+    }
+
+    // Drop legacy non-unique lead_id indexes so planner prefers the unique partial one.
+    for (const leadIdx of leadIndexes) {
+        if (leadIdx?.unique) continue;
         try {
             await coll.dropIndex(leadIdx.name);
             logger.info("[DB] Dropped non-unique lead_id index to replace with unique", {
@@ -84,13 +111,29 @@ async function ensureCallLogsLeadIdIndex(database, collectionName) {
         }
     }
 
-    if (leadIdx && leadIdx.unique) {
+    if (hasUsableUniqueLeadIdx) {
         return;
     }
 
     try {
-        await coll.createIndex({ lead_id: 1 }, { unique: true });
-        logger.info("[DB] Unique index on lead_id ensured", { collectionName });
+        await coll.createIndex(
+            { lead_id: 1 },
+            {
+                name: "lead_id_unique_nonempty",
+                unique: true,
+                // Ignore null/empty lead IDs so historical sparse data doesn't
+                // break unique index creation.
+                partialFilterExpression: {
+                    lead_id: {
+                        // Keep only non-empty strings for uniqueness.
+                        // This avoids unsupported $ne/$not partial expressions on older Mongo builds.
+                        $type: "string",
+                        $gt: "",
+                    },
+                },
+            }
+        );
+        logger.info("[DB] Partial unique index on lead_id ensured", { collectionName });
     } catch (err) {
         const msg = String(err.message || "");
         const dupData =
@@ -101,7 +144,7 @@ async function ensureCallLogsLeadIdIndex(database, collectionName) {
 
         if (dupData) {
             logger.warn(
-                "[DB] Duplicate lead_id values; cannot use unique index — creating non-unique index",
+                "[DB] Duplicate non-empty lead_id values; cannot use unique index — creating non-unique index",
                 { error: msg, collectionName }
             );
             await coll.createIndex({ lead_id: 1 });
