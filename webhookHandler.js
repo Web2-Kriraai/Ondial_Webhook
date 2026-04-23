@@ -37,26 +37,50 @@ async function updateByContactId(contactId, newStatus, context = "") {
     if (isMongoObjectIdString(cid)) {
         try {
             const db = getDb();
+            const oid = new ObjectId(cid);
+            const shouldBlockDowngrade = newStatus !== 3;
+            const filter = shouldBlockDowngrade
+                ? {
+                    _id: oid,
+                    $or: [
+                        { callReceiveStatus: { $ne: 3 } },
+                        { status: { $ne: "completed" } }
+                    ]
+                }
+                : { _id: oid };
             const result = await db.collection("contactprocessings").updateOne(
-                { _id: new ObjectId(cid) },
+                filter,
                 { $set: { callReceiveStatus: newStatus, updatedAt: new Date() } }
             );
             if (result.matchedCount === 0) {
+                const current = await db.collection("contactprocessings").findOne(
+                    { _id: oid },
+                    { projection: { _id: 1, status: 1, callReceiveStatus: 1 } }
+                );
+                if (current?._id && shouldBlockDowngrade && String(current.status) === "completed" && Number(current.callReceiveStatus) === 3) {
+                    logger.warn(`[Webhook] Downgrade blocked for finalized contact_id=${cid} (${context})`, {
+                        attemptedStatus: newStatus,
+                        effectiveStatus: 3
+                    });
+                    return { applied: false, blocked: true, effectiveStatus: 3, contactId: cid };
+                }
                 logger.warn(`[Webhook] No contact found for contact_id=${cid} (${context})`);
+                return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
             } else {
                 logger.info(`[Webhook] callReceiveStatus=${newStatus} for contact_id=${cid} (${context})`);
+                return { applied: true, blocked: false, effectiveStatus: newStatus, contactId: cid };
             }
         } catch (err) {
             logger.error(`[Webhook] updateByContactId failed: ${err.message}`, { contactId: cid, context });
+            return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
         }
-        return;
+        return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
     }
 
     if (cid.startsWith("direct_")) {
         const digits = cid.slice("direct_".length).replace(/\D/g, "");
         if (digits) {
-            await updateByMobile(digits, newStatus, `${context} [direct_contact_id]`);
-            return;
+            return await updateByMobile(digits, newStatus, `${context} [direct_contact_id]`);
         }
     }
 
@@ -64,6 +88,7 @@ async function updateByContactId(contactId, newStatus, context = "") {
         contactId: cid,
         context,
     });
+    return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
 }
 
 function normalizeMobile(num) {
@@ -84,11 +109,25 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
         // Avoid broad updateMany and pick the most recent contact only.
         const contact = await db.collection("contactprocessings").findOne(
             { mobileNumber: { $in: variants } },
-            { sort: { updatedAt: -1, _id: -1 }, projection: { _id: 1 } }
+            { sort: { updatedAt: -1, _id: -1 }, projection: { _id: 1, status: 1, callReceiveStatus: 1 } }
         );
         if (!contact?._id) {
             logger.warn(`[Webhook] Fallback phone match found no record (${context})`, { mobile });
-            return;
+            return { applied: false, blocked: false, effectiveStatus: null, contactId: null };
+        }
+        const shouldBlockDowngrade = newStatus !== 3;
+        if (
+            shouldBlockDowngrade &&
+            String(contact.status) === "completed" &&
+            Number(contact.callReceiveStatus) === 3
+        ) {
+            logger.warn(`[Webhook] Downgrade blocked for finalized contact via mobile (${context})`, {
+                attemptedStatus: newStatus,
+                effectiveStatus: 3,
+                contactId: String(contact._id),
+                mobile
+            });
+            return { applied: false, blocked: true, effectiveStatus: 3, contactId: String(contact._id) };
         }
         await db.collection("contactprocessings").updateOne(
             { _id: contact._id },
@@ -99,8 +138,10 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
             contactId: String(contact._id),
             status: newStatus,
         });
+        return { applied: true, blocked: false, effectiveStatus: newStatus, contactId: String(contact._id) };
     } catch (err) {
         logger.error(`[Webhook] updateByMobile failed: ${err.message}`, { mobileRaw, context });
+        return { applied: false, blocked: false, effectiveStatus: null, contactId: null };
     }
 }
 
@@ -125,13 +166,14 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
     const isInboundMapping = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
 
     if (contact_id) {
-        await updateByContactId(contact_id, newStatus, context);
+        const updateResult = await updateByContactId(contact_id, newStatus, context);
+        const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
         if (campaign_id || isInboundMapping) {
             callEvents.emit("call_update", {
                 campaign_id: campaign_id || null,
                 call_id: callId,
                 contact_id,
-                status: newStatus,
+                status: emittedStatus,
                 timestamp: new Date().toISOString()
             });
         }
@@ -150,11 +192,12 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
     }
 
     logger.warn(`[Webhook] No mapping for call_id=${normalizeCallId(callId)} — falling back to broad phone match`);
-    await updateByMobile(mobileRaw, newStatus, context);
+    const updateResult = await updateByMobile(mobileRaw, newStatus, context);
+    const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
 
     callEvents.emit("call_update", {
         call_id: callId,
-        status: newStatus,
+        status: emittedStatus,
         timestamp: new Date().toISOString()
     });
 }
