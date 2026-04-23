@@ -159,6 +159,34 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
     });
 }
 
+async function didCallReachAnsweredStage({ leadId, callId, collectionName }) {
+    try {
+        const db = getDb();
+        const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
+        let doc = null;
+
+        if (isInbound) {
+            const normalizedCallId = normalizeCallId(callId);
+            if (!normalizedCallId) return false;
+            doc = await db.collection(collectionName).findOne(
+                { call_id: normalizedCallId },
+                { projection: { "call_data.events.event_type": 1 } }
+            );
+        } else if (hasLeadId(leadId)) {
+            doc = await db.collection(collectionName || "CallLogs").findOne(
+                { lead_id: String(leadId) },
+                { projection: { "call_data.events.event_type": 1 } }
+            );
+        }
+
+        const events = Array.isArray(doc?.call_data?.events) ? doc.call_data.events : [];
+        return events.some((e) => String(e?.event_type || "").toLowerCase() === "call_answered");
+    } catch (err) {
+        logger.warn(`[Webhook] didCallReachAnsweredStage lookup failed: ${err.message}`);
+        return false;
+    }
+}
+
 // ─── Event Webhook Handler ────────────────────────────────────────────────────
 
 function hasLeadId(v) {
@@ -227,13 +255,18 @@ async function handleEventWebhook(body) {
 
         case "call_hangup": {
             const dur = parseInt(duration, 10) || 0;
-            if (dur > 0) {
-                // Call completed successfully
-                await updateStatus(call_id, to, 3, `${event} duration=${dur}s`);
-            } else {
-                // Call went out (rang) but user didn't answer — status=1
-                await updateStatus(call_id, to, 1, `${event} no-answer duration=0`);
-            }
+            const answeredStageSeen = await didCallReachAnsweredStage({
+                leadId: lead_id,
+                callId: call_id,
+                collectionName,
+            });
+            const hangupStatus = answeredStageSeen ? 3 : 1;
+            await updateStatus(
+                call_id,
+                to,
+                hangupStatus,
+                `${event} duration=${dur}s answeredSeen=${answeredStageSeen ? "yes" : "no"}`
+            );
             // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
             if (isInboundLog && docKey) {
                 await notifyOndialInboundWebhook(docKey);
@@ -277,12 +310,10 @@ async function handleSummaryWebhook(body) {
      * because some CDRs send contradictory data (e.g. NO ANSWER + duration=41s).
      */
     let newStatus;
-    if (CallStatus === "ANSWER" && dur > 0) {
+    if (dur > 0 || CallStatus === "ANSWER") {
         newStatus = 3;  // completed
     } else if (CallStatus === "BUSY" || CallStatus === "NO ANSWER") {
         newStatus = 1;  // rang but not answered
-    } else if (dur > 0) {
-        newStatus = 3;  // has duration → treat as completed
     } else {
         newStatus = 0;  // technical failure
     }
