@@ -7,7 +7,7 @@ const { registerCallMapping, normalizePhone } = require("./callMapping");
 const { createCallLog, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
-const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers } = require("./webhookQueue");
+const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const crypto = require("crypto");
 
@@ -84,9 +84,6 @@ app.post("/api/call-mapping", async (req, res) => {
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
-
-    res.status(200).json({ received: true });
-
     const body = req.body;
 
     logger.info("Webhook received", {
@@ -96,9 +93,21 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
         payloadType: body && body.event ? "event" : body && body.Call_UniqueId ? "summary" : "unknown",
     });
 
-    enqueueWebhook(body).catch((err) => {
+    try {
+        const result = await enqueueWebhook(body);
+        return res.status(200).json({
+            received: true,
+            queued: true,
+            duplicate: result?.duplicate === true,
+        });
+    } catch (err) {
         logger.error("Webhook enqueue error", { error: err.message });
-    });
+        return res.status(503).json({
+            received: false,
+            queued: false,
+            error: "webhook_queue_unavailable",
+        });
+    }
 });
 
 // Inbound: tie webhooks to Mongo by normalized call_id only (no contactprocessings lookup).
@@ -164,10 +173,32 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok", time: new Date().toISOString() });
 });
 
+app.get("/health/slo", async (req, res) => {
+    try {
+        const queue = await getQueueLagSnapshot();
+        return res.json({
+            status: "ok",
+            time: new Date().toISOString(),
+            webhookQueue: queue,
+        });
+    } catch (error) {
+        return res.status(500).json({
+            status: "error",
+            error: error.message,
+        });
+    }
+});
+
 // ─── Start Server ─────────────────────────────────────────────────────────────
 async function start() {
     try {
         await connectDB();
+        const db = require("./db").getDb();
+        await Promise.all([
+            db.collection("call_event_store").createIndex({ createdAt: -1 }, { background: true }),
+            db.collection("call_event_store").createIndex({ dedupeKey: 1 }, { background: true }),
+            db.collection("call_event_store").createIndex({ status: 1, createdAt: -1 }, { background: true }),
+        ]);
         await connectRedis();
         startWebhookWorkers().catch((err) => {
             logger.error("Failed to start webhook workers", { error: err.message });

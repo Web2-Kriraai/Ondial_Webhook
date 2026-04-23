@@ -18,6 +18,39 @@ const { notifyOndialInboundWebhook } = require("./inboundNotify");
  */
 
 const PROCESSED_TTL_MS = Number(process.env.PROCESSED_WEBHOOK_TTL_MS || 2 * 60 * 60 * 1000);
+const PROCESSING_TTL_MS = Number(process.env.PROCESSING_WEBHOOK_TTL_MS || 5 * 60 * 1000);
+
+async function appendRawWebhookEvent(payload, dedupeKey) {
+    const db = getDb();
+    const now = new Date();
+    const doc = {
+        dedupeKey,
+        payloadHash: payloadHash(payload),
+        payload,
+        sourceType: payload?.event ? 'event' : payload?.Call_UniqueId ? 'summary' : 'unknown',
+        createdAt: now,
+        processedAt: null,
+        status: 'queued',
+        error: null,
+    };
+    const result = await db.collection('call_event_store').insertOne(doc);
+    return result.insertedId;
+}
+
+async function markRawWebhookEvent(eventId, status, error = null) {
+    if (!eventId) return;
+    const db = getDb();
+    await db.collection('call_event_store').updateOne(
+        { _id: eventId },
+        {
+            $set: {
+                status,
+                processedAt: new Date(),
+                error: error ? String(error) : null,
+            },
+        }
+    );
+}
 
 // ─── DB Update Helpers ────────────────────────────────────────────────────────
 
@@ -332,15 +365,6 @@ async function handleEventWebhook(body) {
 async function handleSummaryWebhook(body) {
     const { Call_UniqueId, To_number, Duration, CallStatus, RecordingURL, lead_id: cdr_lead_id } = body;
 
-    const dedupeKey = Call_UniqueId ? `cdr:${Call_UniqueId}` : null;
-    if (dedupeKey) {
-        const stored = await reserveDedupe(dedupeKey);
-        if (!stored) {
-            logger.info(`[Webhook] Duplicate CDR skipped: Call_UniqueId=${Call_UniqueId}`);
-            return;
-        }
-    }
-
     const dur = parseInt(Duration, 10) || 0;
 
     /**
@@ -398,28 +422,57 @@ async function handleSummaryWebhook(body) {
 
 async function handleWebhook(body) {
     const genericKey = `payload:${payloadHash(body)}`;
-    const stored = await reserveDedupe(genericKey);
-    if (!stored) {
-        logger.info("[Webhook] Duplicate payload skipped");
+    const dedupeState = await beginDedupeProcessing(genericKey);
+    if (dedupeState.skip) {
+        logger.info(
+            dedupeState.inflight
+                ? "[Webhook] Payload processing already in-flight, skipping duplicate"
+                : "[Webhook] Duplicate payload skipped"
+        );
         return;
     }
-
-    if (body.event) {
-        await handleEventWebhook(body);
-    } else if (body.Call_UniqueId) {
-        await handleSummaryWebhook(body);
-    } else {
-        logger.warn("[Webhook] Unknown payload shape, skipping", body);
+    const rawEventId = await appendRawWebhookEvent(body, genericKey);
+    try {
+        if (body.event) {
+            await handleEventWebhook(body);
+        } else if (body.Call_UniqueId) {
+            await handleSummaryWebhook(body);
+        } else {
+            logger.warn("[Webhook] Unknown payload shape, skipping", body);
+        }
+        await markRawWebhookEvent(rawEventId, 'processed');
+        await markDedupeProcessed(genericKey);
+    } catch (err) {
+        await markRawWebhookEvent(rawEventId, 'failed', err?.message || 'unknown_error');
+        await clearDedupeProcessing(genericKey);
+        throw err;
     }
 }
 
 module.exports = { handleWebhook };
 
-async function reserveDedupe(key) {
+async function beginDedupeProcessing(key) {
     const redis = getRedis();
+    const doneKey = `dedupe:done:${key}`;
+    const lockKey = `dedupe:lock:${key}`;
+    const done = await redis.get(doneKey);
+    if (done) return { skip: true, inflight: false };
+    const lock = await redis.set(lockKey, "1", "PX", PROCESSING_TTL_MS, "NX");
+    if (lock !== "OK") return { skip: true, inflight: true };
+    return { skip: false };
+}
+
+async function markDedupeProcessed(key) {
+    const redis = getRedis();
+    const doneKey = `dedupe:done:${key}`;
+    const lockKey = `dedupe:lock:${key}`;
     const ttlSec = Math.ceil(PROCESSED_TTL_MS / 1000);
-    const result = await redis.set(`dedupe:${key}`, "1", "EX", ttlSec, "NX");
-    return result === "OK";
+    await redis.multi().set(doneKey, "1", "EX", ttlSec).del(lockKey).exec();
+}
+
+async function clearDedupeProcessing(key) {
+    const redis = getRedis();
+    await redis.del(`dedupe:lock:${key}`);
 }
 
 function payloadHash(body) {

@@ -23,18 +23,22 @@ function hashPayload(source, body) {
 async function enqueueWebhook(body) {
     const dedupeKey = hashPayload("webhook", body);
     const q = getQueue();
-    await q.add("webhook", body, {
-        jobId: dedupeKey,
-        attempts: MAX_RETRIES + 1,
-        backoff: { type: "exponential", delay: BASE_RETRY_DELAY_MS },
-        removeOnComplete: { age: 300, count: 1000 },
-        removeOnFail: false,
-    }).catch((err) => {
+    try {
+        await q.add("webhook", body, {
+            jobId: dedupeKey,
+            attempts: MAX_RETRIES + 1,
+            backoff: { type: "exponential", delay: BASE_RETRY_DELAY_MS },
+            removeOnComplete: { age: 300, count: 1000 },
+            removeOnFail: false,
+        });
+        return { accepted: true, duplicate: false };
+    } catch (err) {
         // Duplicate jobId means same payload already queued/processed recently.
-        if (!String(err.message || "").includes("already exists")) {
-            throw err;
+        if (String(err.message || "").includes("already exists")) {
+            return { accepted: true, duplicate: true };
         }
-    });
+        throw err;
+    }
 }
 
 async function startWebhookWorkers() {
@@ -94,8 +98,21 @@ async function closeWebhookWorkers() {
     queueEvents = null;
 }
 
+async function getQueueLagSnapshot() {
+    const q = getQueue();
+    const counts = await q.getJobCounts('waiting', 'active', 'delayed', 'failed', 'completed');
+    return {
+        waiting: counts.waiting || 0,
+        active: counts.active || 0,
+        delayed: counts.delayed || 0,
+        failed: counts.failed || 0,
+        completed: counts.completed || 0,
+    };
+}
+
 module.exports = {
     enqueueWebhook,
     startWebhookWorkers,
     closeWebhookWorkers,
+    getQueueLagSnapshot,
 };
