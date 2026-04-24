@@ -135,9 +135,11 @@ app.post("/api/call-mapping", async (req, res) => {
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
-    // if (!verifyIngressAuth(req, { allowHmac: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
-    //     return res.status(401).json({ received: false, queued: false, error: "unauthorized_webhook" });
-    // }
+    if (!verifyIngressAuth(req, { allowHmac: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
+        console.log("Unauthorized webhook");
+        return res.status(401).json({ received: false, queued: false, error: "unauthorized_webhook" });
+    }
+    console.log("Webhook authorized");
     const body = req.body;
 
     logger.info("Webhook received", {
