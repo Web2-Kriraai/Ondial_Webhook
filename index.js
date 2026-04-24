@@ -22,7 +22,13 @@ app.use(express.json({
         req.rawBody = Buffer.from(buf || Buffer.alloc(0));
     }
 }));
-app.use(express.urlencoded({ extended: true, limit: process.env.REQUEST_BODY_LIMIT || "1mb" }));
+app.use(express.urlencoded({ 
+    extended: true, 
+    limit: process.env.REQUEST_BODY_LIMIT || "1mb",
+    verify: (req, _res, buf) => {
+        if (!req.rawBody) req.rawBody = Buffer.from(buf || Buffer.alloc(0));
+    }
+}));
 
 function timingSafeEqualHex(a, b) {
     try {
@@ -35,34 +41,95 @@ function timingSafeEqualHex(a, b) {
     }
 }
 
-function hasValidSharedSecret(req, secret) {
+function hasValidSharedSecret(req, secret, { allowBearer = true } = {}) {
     const direct = req.headers["x-webhook-secret"];
-    const bearer = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
-    return (direct && String(direct) === secret) || (bearer && String(bearer) === secret);
+    const bearer = allowBearer ? (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "") : null;
+
+    if (!direct && !bearer) {
+        logger.debug("[Auth] SharedSecret check failed: No secret headers found");
+        return false;
+    }
+
+    const check = (val, type) => {
+        if (!val) return false;
+        try {
+            const hashA = crypto.createHash("sha256").update(String(val)).digest();
+            const hashB = crypto.createHash("sha256").update(String(secret)).digest();
+            const match = crypto.timingSafeEqual(hashA, hashB);
+            if (!match) {
+                logger.warn(`[Auth] SharedSecret mismatch for ${type}`, {
+                    providedLength: val.length,
+                    expectedLength: secret.length
+                });
+            }
+            return match;
+        } catch (err) {
+            logger.error(`[Auth] SharedSecret comparison error for ${type}`, { error: err.message });
+            return false;
+        }
+    };
+
+    const isDirectMatch = check(direct, "x-webhook-secret");
+    if (isDirectMatch) return true;
+
+    const isBearerMatch = allowBearer ? check(bearer, "Authorization Bearer") : false;
+    return isBearerMatch;
 }
 
 function hasValidHmac(req, hmacSecret) {
     const tsRaw = req.headers["x-webhook-timestamp"];
     const sigRaw = req.headers["x-webhook-signature"];
-    if (!tsRaw || !sigRaw) return false;
+    if (!tsRaw || !sigRaw) {
+        logger.debug("[Auth] HMAC check failed: Missing timestamp or signature headers");
+        return false;
+    }
     const tsMs = Number(tsRaw);
-    if (!Number.isFinite(tsMs)) return false;
-    if (Math.abs(Date.now() - tsMs) > MAX_WEBHOOK_SKEW_MS) return false;
+    if (!Number.isFinite(tsMs)) {
+        logger.warn("[Auth] HMAC check failed: Invalid timestamp", { tsRaw });
+        return false;
+    }
+    const skew = Math.abs(Date.now() - tsMs);
+    if (skew > MAX_WEBHOOK_SKEW_MS) {
+        logger.warn("[Auth] HMAC check failed: Timestamp skew too large", { skew, max: MAX_WEBHOOK_SKEW_MS });
+        return false;
+    }
     const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body || {});
     const expected = crypto.createHmac("sha256", hmacSecret).update(`${tsMs}.${rawBody}`).digest("hex");
-    return timingSafeEqualHex(String(sigRaw), expected);
+    const match = timingSafeEqualHex(String(sigRaw), expected);
+    if (!match) {
+        logger.warn("[Auth] HMAC signature mismatch");
+    }
+    return match;
 }
 
-function verifyIngressAuth(req, { allowHmac = true, secretEnv = "WEBHOOK_SHARED_SECRET" } = {}) {
+function verifyIngressAuth(req, { allowHmac = true, allowBearer = true, secretEnv = "WEBHOOK_SHARED_SECRET" } = {}) {
     const sharedSecret = process.env[secretEnv] || "";
     const hmacSecret = process.env.WEBHOOK_HMAC_SECRET || "";
     const isProd = process.env.NODE_ENV === "production";
 
     // In development, allow running without configured secrets.
-    if (!isProd && !sharedSecret && !hmacSecret) return true;
+    if (!isProd && !sharedSecret && !hmacSecret) {
+        logger.info("[Auth] Development mode: No secrets configured, allowing access");
+        return true;
+    }
 
-    if (sharedSecret && hasValidSharedSecret(req, sharedSecret)) return true;
-    if (allowHmac && hmacSecret && hasValidHmac(req, hmacSecret)) return true;
+    if (sharedSecret && hasValidSharedSecret(req, sharedSecret, { allowBearer })) {
+        console.log(">>> [AUTH SUCCESS] Valid Shared Secret");
+        return true;
+    }
+    if (allowHmac && hmacSecret && hasValidHmac(req, hmacSecret)) {
+        console.log(">>> [AUTH SUCCESS] Valid HMAC Signature");
+        return true;
+    }
+
+    console.log(">>> [AUTH FAILED] No valid authentication found");
+    logger.warn("[Auth] All ingress authentication methods failed", {
+        headers: {
+            "x-webhook-secret": req.headers["x-webhook-secret"] ? "present" : "missing",
+            "authorization": req.headers["authorization"] ? "present" : "missing",
+            "x-webhook-signature": req.headers["x-webhook-signature"] ? "present" : "missing"
+        }
+    });
     return false;
 }
 
@@ -135,11 +202,12 @@ app.post("/api/call-mapping", async (req, res) => {
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
-    if (!verifyIngressAuth(req, { allowHmac: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
-        console.log("Unauthorized webhook");
+    console.log(`\n--- Incoming Webhook Request from ${req.ip} ---`);
+    if (!verifyIngressAuth(req, { allowHmac: false, allowBearer: false, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
+        console.log("--- [WEBHOOK REJECTED] 401 Unauthorized ---\n");
         return res.status(401).json({ received: false, queued: false, error: "unauthorized_webhook" });
     }
-    console.log("Webhook authorized");
+    console.log("--- [WEBHOOK AUTHORIZED] Processing... ---\n");
     const body = req.body;
 
     logger.info("Webhook received", {
