@@ -2,7 +2,14 @@ const { ObjectId } = require("mongodb");
 const crypto = require("crypto");
 const { getDb } = require("./db");
 const { getRedis } = require("./redis");
-const { lookupMapping, lookupMappingByPhone, enrichPhoneMapping, normalizeCallId } = require("./callMapping");
+const {
+    lookupMapping,
+    lookupMappingByPhone,
+    enrichPhoneMapping,
+    normalizeCallId,
+    markCallAnswered,
+    hasAnsweredFlag,
+} = require("./callMapping");
 const { appendCallEvent, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
@@ -296,16 +303,19 @@ async function handleEventWebhook(body) {
             break;
 
         case "call_answered":
+            await markCallAnswered(call_id, to);
             await updateStatus(call_id, to, 2, event);
             break;
 
         case "call_hangup": {
             const dur = parseInt(duration, 10) || 0;
-            const answeredStageSeen = await didCallReachAnsweredStage({
-                leadId: lead_id,
-                callId: call_id,
-                collectionName,
-            });
+            const answeredStageSeen =
+                (await hasAnsweredFlag(call_id, to)) ||
+                (await didCallReachAnsweredStage({
+                    leadId: lead_id,
+                    callId: call_id,
+                    collectionName,
+                }));
             const hangupStatus = answeredStageSeen ? 3 : 1;
             await updateStatus(
                 call_id,
@@ -336,15 +346,46 @@ async function handleSummaryWebhook(body) {
     const { Call_UniqueId, To_number, Duration, CallStatus, RecordingURL, lead_id: cdr_lead_id } = body;
 
     const dur = parseInt(Duration, 10) || 0;
-    const newStatus = mapCdrSummaryToReceiveStatus({ Duration, CallStatus });
 
-    // Look up mapping first to get our lead_id; fall back to lead_id from CDR body
+    // Look up mapping first (needed for answered-stage checks and collections)
     const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
     const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
     const contact_id = mapping?.contact_id || null;
     const collectionName = mapping?.collectionName || null;
     const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
     const cdrCallKey = normalizeCallId(Call_UniqueId);
+
+    /**
+     * Status mapping for CDR summary:
+     *   3 = provider says ANSWER, or we have answer evidence + talk time / contradictory CDR fix
+     *   1 = BUSY / NO ANSWER / ring-only (dur>0 without answer path)
+     *   0 = no duration and not answered
+     *
+     * `dur > 0` alone is not enough (can be ring time) unless we saw call_answered (Redis/Mongo).
+     * Contradictory CDR (e.g. NO ANSWER + duration) → 3 only with answer evidence.
+     */
+    const answeredEvidence =
+        (await hasAnsweredFlag(Call_UniqueId, To_number)) ||
+        (await didCallReachAnsweredStage({
+            leadId: lead_id,
+            callId: Call_UniqueId,
+            collectionName,
+        }));
+
+    let newStatus;
+    if (CallStatus === "ANSWER") {
+        newStatus = 3;
+    } else if (CallStatus === "BUSY" || CallStatus === "NO ANSWER") {
+        if (dur > 0 && answeredEvidence) {
+            newStatus = 3;
+        } else {
+            newStatus = 1;
+        }
+    } else if (dur > 0) {
+        newStatus = answeredEvidence ? 3 : 1;
+    } else {
+        newStatus = 0;
+    }
 
     if (!hasLeadId(lead_id) && !(isInboundLog && cdrCallKey)) {
         await logMissingCallMapping({
@@ -366,6 +407,10 @@ async function handleSummaryWebhook(body) {
         await notifyOndialInboundWebhook(cdrCallKey);
     } else {
         await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
+    }
+
+    if (newStatus === 3) {
+        await markCallAnswered(Call_UniqueId, To_number);
     }
 
     await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`);
