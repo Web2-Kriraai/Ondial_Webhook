@@ -13,10 +13,58 @@ const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 9000;
+const MAX_WEBHOOK_SKEW_MS = Number(process.env.WEBHOOK_MAX_SKEW_MS || 5 * 60 * 1000);
 
 app.use(cors());
-app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || "1mb" }));
+app.use(express.json({
+    limit: process.env.REQUEST_BODY_LIMIT || "1mb",
+    verify: (req, _res, buf) => {
+        req.rawBody = Buffer.from(buf || Buffer.alloc(0));
+    }
+}));
 app.use(express.urlencoded({ extended: true, limit: process.env.REQUEST_BODY_LIMIT || "1mb" }));
+
+function timingSafeEqualHex(a, b) {
+    try {
+        const aa = Buffer.from(String(a || ""), "hex");
+        const bb = Buffer.from(String(b || ""), "hex");
+        if (!aa.length || aa.length !== bb.length) return false;
+        return crypto.timingSafeEqual(aa, bb);
+    } catch {
+        return false;
+    }
+}
+
+function hasValidSharedSecret(req, secret) {
+    const direct = req.headers["x-webhook-secret"];
+    const bearer = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
+    return (direct && String(direct) === secret) || (bearer && String(bearer) === secret);
+}
+
+function hasValidHmac(req, hmacSecret) {
+    const tsRaw = req.headers["x-webhook-timestamp"];
+    const sigRaw = req.headers["x-webhook-signature"];
+    if (!tsRaw || !sigRaw) return false;
+    const tsMs = Number(tsRaw);
+    if (!Number.isFinite(tsMs)) return false;
+    if (Math.abs(Date.now() - tsMs) > MAX_WEBHOOK_SKEW_MS) return false;
+    const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body || {});
+    const expected = crypto.createHmac("sha256", hmacSecret).update(`${tsMs}.${rawBody}`).digest("hex");
+    return timingSafeEqualHex(String(sigRaw), expected);
+}
+
+function verifyIngressAuth(req, { allowHmac = true, secretEnv = "WEBHOOK_SHARED_SECRET" } = {}) {
+    const sharedSecret = process.env[secretEnv] || "";
+    const hmacSecret = process.env.WEBHOOK_HMAC_SECRET || "";
+    const isProd = process.env.NODE_ENV === "production";
+
+    // In development, allow running without configured secrets.
+    if (!isProd && !sharedSecret && !hmacSecret) return true;
+
+    if (sharedSecret && hasValidSharedSecret(req, sharedSecret)) return true;
+    if (allowHmac && hmacSecret && hasValidHmac(req, hmacSecret)) return true;
+    return false;
+}
 
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
@@ -52,6 +100,9 @@ app.get("/api/v1/sse/listen", (req, res) => {
 // Receives: { lead_id, call_id, campaign_id, contact_id }
 // Called automatically by the telephony server ~1-2s after call is initiated.
 app.post("/api/call-mapping", async (req, res) => {
+    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_mapping_ingress" });
+    // }
     res.status(200).json({ received: true });
 
     const { lead_id, call_id, campaign_id, contact_id } = req.body;
@@ -84,6 +135,11 @@ app.post("/api/call-mapping", async (req, res) => {
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
+    if (!verifyIngressAuth(req, { allowHmac: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
+        console.log("Unauthorized webhook");
+        return res.status(401).json({ received: false, queued: false, error: "unauthorized_webhook" });
+    }
+    console.log("Webhook authorized");
     const body = req.body;
 
     logger.info("Webhook received", {
@@ -94,7 +150,11 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
     });
 
     try {
-        const result = await enqueueWebhook(body);
+        const result = await enqueueWebhook(body, {
+            eventId: req.headers["x-webhook-event-id"] || null,
+            timestamp: req.headers["x-webhook-timestamp"] || null,
+            requestId: req.headers["x-request-id"] || null,
+        });
         return res.status(200).json({
             received: true,
             queued: true,
@@ -113,6 +173,9 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
 // Inbound: tie webhooks to Mongo by normalized call_id only (no contactprocessings lookup).
 // Optional body fields: campaign_id, contact_id, from_number (phone index + CRM updates if set).
 app.post("/api/inbound-mapping", async (req, res) => {
+    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_inbound_mapping" });
+    // }
     res.status(200).json({ received: true });
 
     const { call_type, call_id, from_number, campaign_id, contact_id } = req.body;
@@ -192,13 +255,14 @@ app.get("/health/slo", async (req, res) => {
 // ─── Start Server ─────────────────────────────────────────────────────────────
 async function start() {
     try {
+        // if (process.env.NODE_ENV === "production") {
+        //     const hasIngressSecret = Boolean(process.env.WEBHOOK_SHARED_SECRET || process.env.WEBHOOK_HMAC_SECRET);
+        //     const hasInternalSecret = Boolean(process.env.WEBHOOK_INTERNAL_SECRET);
+        //     if (!hasIngressSecret || !hasInternalSecret) {
+        //         throw new Error("Missing webhook security secrets (WEBHOOK_SHARED_SECRET/WEBHOOK_HMAC_SECRET and WEBHOOK_INTERNAL_SECRET)");
+        //     }
+        // }
         await connectDB();
-        const db = require("./db").getDb();
-        await Promise.all([
-            db.collection("call_event_store").createIndex({ createdAt: -1 }, { background: true }),
-            db.collection("call_event_store").createIndex({ dedupeKey: 1 }, { background: true }),
-            db.collection("call_event_store").createIndex({ status: 1, createdAt: -1 }, { background: true }),
-        ]);
         await connectRedis();
         startWebhookWorkers().catch((err) => {
             logger.error("Failed to start webhook workers", { error: err.message });

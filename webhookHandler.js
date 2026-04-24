@@ -15,6 +15,7 @@ const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
+const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 
 /**
  * callReceiveStatus values:
@@ -26,38 +27,7 @@ const { notifyOndialInboundWebhook } = require("./inboundNotify");
 
 const PROCESSED_TTL_MS = Number(process.env.PROCESSED_WEBHOOK_TTL_MS || 2 * 60 * 60 * 1000);
 const PROCESSING_TTL_MS = Number(process.env.PROCESSING_WEBHOOK_TTL_MS || 5 * 60 * 1000);
-
-async function appendRawWebhookEvent(payload, dedupeKey) {
-    const db = getDb();
-    const now = new Date();
-    const doc = {
-        dedupeKey,
-        payloadHash: payloadHash(payload),
-        payload,
-        sourceType: payload?.event ? 'event' : payload?.Call_UniqueId ? 'summary' : 'unknown',
-        createdAt: now,
-        processedAt: null,
-        status: 'queued',
-        error: null,
-    };
-    const result = await db.collection('call_event_store').insertOne(doc);
-    return result.insertedId;
-}
-
-async function markRawWebhookEvent(eventId, status, error = null) {
-    if (!eventId) return;
-    const db = getDb();
-    await db.collection('call_event_store').updateOne(
-        { _id: eventId },
-        {
-            $set: {
-                status,
-                processedAt: new Date(),
-                error: error ? String(error) : null,
-            },
-        }
-    );
-}
+const REPLAY_NONCE_TTL_SEC = Number(process.env.WEBHOOK_REPLAY_NONCE_TTL_SEC || 3600);
 
 // ─── DB Update Helpers ────────────────────────────────────────────────────────
 
@@ -448,7 +418,22 @@ async function handleSummaryWebhook(body) {
 
 // ─── Main Router ──────────────────────────────────────────────────────────────
 
-async function handleWebhook(body) {
+async function reserveReplayNonce(meta = {}) {
+    const eventId = meta?.eventId ? String(meta.eventId).trim() : '';
+    if (!eventId) return { ok: true };
+    const redis = getRedis();
+    const key = `replay:event:${eventId}`;
+    const setOk = await redis.set(key, '1', 'EX', REPLAY_NONCE_TTL_SEC, 'NX');
+    if (setOk !== 'OK') return { ok: false, reason: 'replay_event_id' };
+    return { ok: true };
+}
+
+async function handleWebhook(body, meta = {}) {
+    const replay = await reserveReplayNonce(meta);
+    if (!replay.ok) {
+        logger.warn('[Webhook] Replay blocked by event-id nonce', { reason: replay.reason });
+        return;
+    }
     const genericKey = `payload:${payloadHash(body)}`;
     const dedupeState = await beginDedupeProcessing(genericKey);
     if (dedupeState.skip) {
@@ -459,19 +444,16 @@ async function handleWebhook(body) {
         );
         return;
     }
-    const rawEventId = await appendRawWebhookEvent(body, genericKey);
     try {
         if (body.event) {
             await handleEventWebhook(body);
         } else if (body.Call_UniqueId) {
             await handleSummaryWebhook(body);
         } else {
-            logger.warn("[Webhook] Unknown payload shape, skipping", body);
+            logger.warn("[Webhook] Unknown payload shape, skipping");
         }
-        await markRawWebhookEvent(rawEventId, 'processed');
         await markDedupeProcessed(genericKey);
     } catch (err) {
-        await markRawWebhookEvent(rawEventId, 'failed', err?.message || 'unknown_error');
         await clearDedupeProcessing(genericKey);
         throw err;
     }

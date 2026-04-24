@@ -20,11 +20,11 @@ function hashPayload(source, body) {
         .digest("hex");
 }
 
-async function enqueueWebhook(body) {
+async function enqueueWebhook(body, meta = {}) {
     const dedupeKey = hashPayload("webhook", body);
     const q = getQueue();
     try {
-        await q.add("webhook", body, {
+        await q.add("webhook", { payload: body, meta }, {
             jobId: dedupeKey,
             attempts: MAX_RETRIES + 1,
             backoff: { type: "exponential", delay: BASE_RETRY_DELAY_MS },
@@ -49,7 +49,7 @@ async function startWebhookWorkers() {
     worker = new Worker(
         QUEUE_NAME,
         async (job) => {
-            await handleWebhook(job.data);
+            await handleWebhook(job.data?.payload || {}, job.data?.meta || {});
         },
         {
             connection,
