@@ -117,4 +117,48 @@ async function enrichPhoneMapping(callId, phone) {
     logger.info(`[CallMapping] Phone enriched: call_id=${key} → phone=${phoneKey}`);
 }
 
-module.exports = { registerCallMapping, lookupMapping, lookupMappingByPhone, enrichPhoneMapping, normalizeCallId, normalizePhone };
+/**
+ * Mark that this call reached the answered stage (Redis, same TTL as mappings).
+ * Indexed by call_id and by `to` phone so hangup/CDR still match if Asterisk swaps call_id.
+ */
+async function markCallAnswered(callId, phoneRaw) {
+    const redis = getRedis();
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    const cid = normalizeCallId(callId);
+    if (cid) {
+        await redis.set(`map:answered:${cid}`, "1", "EX", ttlSec);
+    }
+    const phoneKey = normalizePhone(phoneRaw);
+    if (phoneKey) {
+        await redis.set(`map:answered:phone:${phoneKey}`, "1", "EX", ttlSec);
+    }
+}
+
+/**
+ * True if call_answered was recorded for this call_id or normalized destination phone.
+ */
+async function hasAnsweredFlag(callId, phoneRaw) {
+    const redis = getRedis();
+    const cid = normalizeCallId(callId);
+    if (cid) {
+        const v = await redis.get(`map:answered:${cid}`);
+        if (v === "1") return true;
+    }
+    const phoneKey = normalizePhone(phoneRaw);
+    if (phoneKey) {
+        const v = await redis.get(`map:answered:phone:${phoneKey}`);
+        if (v === "1") return true;
+    }
+    return false;
+}
+
+module.exports = {
+    registerCallMapping,
+    lookupMapping,
+    lookupMappingByPhone,
+    enrichPhoneMapping,
+    normalizeCallId,
+    normalizePhone,
+    markCallAnswered,
+    hasAnsweredFlag,
+};
