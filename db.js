@@ -13,7 +13,15 @@ let db = null;
 async function connectDB() {
     if (db) return db;
 
-    client = new MongoClient(MONGODB_URI);
+    const maxPoolSize = Math.min(
+        Math.max(Number(process.env.MONGODB_MAX_POOL_SIZE || 100), 10),
+        500
+    );
+    client = new MongoClient(MONGODB_URI, {
+        maxPoolSize,
+        minPoolSize: Math.min(5, Math.floor(maxPoolSize / 10)),
+        serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 10_000),
+    });
     await client.connect();
     db = client.db(); // uses the DB name from the URI ("ondial")
 
@@ -41,6 +49,8 @@ async function ensureIndexes(database) {
     ]);
     await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
+    await ensureTwilioCallSidIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
+    await ensureTwilioCallSidIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
     await ensureInboundCallLogIndexByCallId(
         database,
         process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation"
@@ -222,5 +232,43 @@ async function ensureInboundCallLogIndexByCallId(database, collectionName) {
         }
 
         throw err;
+    }
+}
+
+/**
+ * Fast lookup for Twilio status callbacks under high concurrency.
+ * Sparse unique: only documents with twilio.call_sid participate.
+ */
+async function ensureTwilioCallSidIndex(database, collectionName) {
+    const coll = database.collection(collectionName);
+    try {
+        await coll.createIndex(
+            { "twilio.call_sid": 1 },
+            {
+                name: "twilio_call_sid_unique_sparse",
+                unique: true,
+                sparse: true,
+            }
+        );
+        logger.info("[DB] Sparse unique index on twilio.call_sid ensured", { collectionName });
+    } catch (err) {
+        const msg = String(err.message || "");
+        if (
+            err.code === 11000 ||
+            /duplicate key/i.test(msg) ||
+            /E11000/i.test(msg) ||
+            /duplicate key value/i.test(msg)
+        ) {
+            logger.warn(
+                "[DB] Duplicate twilio.call_sid values; using non-unique sparse index",
+                { collectionName }
+            );
+            await coll.createIndex({ "twilio.call_sid": 1 }, { name: "twilio_call_sid_sparse", sparse: true });
+            return;
+        }
+        if (err.code === 85 || /IndexOptionsConflict|already exists/i.test(msg)) {
+            return;
+        }
+        logger.warn("[DB] twilio.call_sid index not created", { collectionName, error: msg });
     }
 }

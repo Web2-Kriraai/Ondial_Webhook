@@ -13,6 +13,114 @@ function resolveCollection({ contact_id }) {
     return CALLLOGS_COLLECTION;
 }
 
+const TWILIO_STATUS_EVENT = "twilio_call_status";
+
+function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIso }) {
+    return {
+        timestamp: new Date().toISOString(),
+        event_type: TWILIO_STATUS_EVENT,
+        data: {
+            CallSid,
+            CallStatus,
+            CallDuration: CallDuration == null ? null : CallDuration,
+            Timestamp: timestampIso,
+        },
+    };
+}
+
+/**
+ * Applies Twilio snapshot fields and appends one call_data event (single round-trip).
+ */
+async function mergeTwilioStatusIntoCallLog(collectionName, filter, twilioSetFields, eventDoc) {
+    const db = getDb();
+    const result = await db.collection(collectionName).updateOne(filter, {
+        $set: { ...twilioSetFields, updatedAt: new Date() },
+        $addToSet: { "call_data.events": eventDoc },
+    });
+    return result.matchedCount > 0;
+}
+
+/**
+ * Creates or updates the Twilio-anchored CallLog row (exactly one doc per CallSid in that collection).
+ */
+async function upsertTwilioAnchoredCallLog({
+    collectionName,
+    twilioCallSid,
+    twilioSetFields,
+    eventDoc,
+    rootFromMapping,
+}) {
+    const db = getDb();
+    const filter = { "twilio.call_sid": twilioCallSid };
+    const campaignId = rootFromMapping.campaign_id != null ? String(rootFromMapping.campaign_id) : "";
+    const contactId = rootFromMapping.contact_id != null ? String(rootFromMapping.contact_id) : "";
+    const leadId = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
+    const callId =
+        rootFromMapping.call_id != null && String(rootFromMapping.call_id).trim()
+            ? String(rootFromMapping.call_id).trim()
+            : twilioCallSid;
+    const effectiveLeadId = leadId || `twilio:${twilioCallSid}`;
+
+    logger.info("[upsertTwilioAnchoredCallLog] Starting upsert", {
+        collection: collectionName,
+        filter,
+        callId,
+        campaignId,
+        contactId,
+        leadId: leadId || null,
+        effectiveLeadId,
+        twilioSetFields: Object.keys(twilioSetFields),
+    });
+
+    const $set = {
+        ...twilioSetFields,
+        "twilio.call_sid": twilioCallSid,
+        updatedAt: new Date(),
+    };
+    if (campaignId) $set.campaign_id = campaignId;
+    if (contactId) $set.contact_id = contactId;
+    if (effectiveLeadId) $set.lead_id = effectiveLeadId;
+    if (callId) $set.call_id = callId;
+
+    const $setOnInsert = {
+        createdAt: new Date().toISOString(),
+        recordingUrl: "",
+    };
+
+    logger.info("[upsertTwilioAnchoredCallLog] Update document structure", {
+        $set: Object.keys($set),
+        $setOnInsert: Object.keys($setOnInsert),
+        addToSetField: "call_data.events",
+    });
+
+    try {
+        const result = await db.collection(collectionName).updateOne(
+            filter,
+            {
+                $set,
+                $setOnInsert,
+                $addToSet: { "call_data.events": eventDoc },
+            },
+            { upsert: true }
+        );
+
+        logger.info("[upsertTwilioAnchoredCallLog] Upsert result", {
+            upsertedCount: result.upsertedCount,
+            modifiedCount: result.modifiedCount,
+            matchedCount: result.matchedCount,
+        });
+
+        return result.upsertedCount > 0 || result.modifiedCount > 0 || result.matchedCount > 0;
+    } catch (err) {
+        logger.error("[upsertTwilioAnchoredCallLog] Error during upsert", {
+            error: err.message,
+            filter,
+            collection: collectionName,
+        });
+        throw err;
+    }
+}
+
 const pendingStubs = new Set();
 
 /**
@@ -184,7 +292,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
                     docFilter,
                     {
                         $setOnInsert: onInsert,
-                        $push: { "call_data.events": newEvent },
+                        $addToSet: { "call_data.events": newEvent },
                         ...(recordingUrl ? { $set: { recordingUrl } } : {}),
                     },
                     { upsert: true }
@@ -217,4 +325,13 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
     }
 }
 
-module.exports = { createCallLog, appendCallEvent, INBOUNDCALLLOG_COLLECTION };
+module.exports = {
+    createCallLog,
+    appendCallEvent,
+    INBOUNDCALLLOG_COLLECTION,
+    resolveCollection,
+    buildTwilioStatusEvent,
+    mergeTwilioStatusIntoCallLog,
+    upsertTwilioAnchoredCallLog,
+    TWILIO_STATUS_EVENT,
+};

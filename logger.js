@@ -35,6 +35,7 @@ function log(level, message, data = null) {
 }
 
 module.exports = {
+    debug: (message, data) => log("debug", message, data),
     info: (message, data) => log("info", message, data),
     error: (message, data) => log("error", message, data),
     warn: (message, data) => log("warn", message, data),

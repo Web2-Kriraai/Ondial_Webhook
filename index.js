@@ -1,10 +1,25 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { connectDB } = require("./db");
+const { ObjectId } = require("mongodb");
+const { connectDB, getDb } = require("./db");
 const { connectRedis } = require("./redis");
-const { registerCallMapping, normalizePhone } = require("./callMapping");
-const { createCallLog, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
+const {
+    registerCallMapping,
+    normalizePhone,
+    normalizeCallId,
+    registerTwilioCallSidMapping,
+    lookupTwilioCallSidMapping,
+    normalizeTwilioCallSid,
+} = require("./callMapping");
+const {
+    createCallLog,
+    INBOUNDCALLLOG_COLLECTION,
+    resolveCollection,
+    buildTwilioStatusEvent,
+    mergeTwilioStatusIntoCallLog,
+    upsertTwilioAnchoredCallLog,
+} = require("./callLogs");
 const logger = require("./logger");
 const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
@@ -14,6 +29,10 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 9000;
 const MAX_WEBHOOK_SKEW_MS = Number(process.env.WEBHOOK_MAX_SKEW_MS || 5 * 60 * 1000);
+
+if (process.env.TRUST_PROXY === "1") {
+    app.set("trust proxy", 1);
+}
 
 app.use(cors());
 app.use(express.json({
@@ -133,6 +152,15 @@ function verifyIngressAuth(req, { allowHmac = true, allowBearer = true, secretEn
     return false;
 }
 
+function mapTwilioStatusToCallReceiveStatus(statusRaw) {
+    const status = String(statusRaw || "").trim().toLowerCase();
+    if (status === "in-progress") return 2;
+    if (status === "completed") return 3;
+    if (status === "busy") return 1;
+    // initiated/ringing (and others) should not force DB status update.
+    return null;
+}
+
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
@@ -197,6 +225,324 @@ app.post("/api/call-mapping", async (req, res) => {
     } catch (err) {
         logger.error("[CallMapping] Failed to store mapping", { error: err.message });
     }
+});
+
+// ─── FLOW 2B: Twilio SID Mapping Endpoint ───────────────────────────────────
+// Receives: { call_sid | twilio_call_sid | CallSid, call_id?, lead_id?, campaign_id, contact_id }
+// Called by the Twilio call-creation service right after Twilio returns CallSid.
+app.post("/api/twilio-mapping", async (req, res) => {
+    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_twilio_mapping_ingress" });
+    // }
+
+    res.status(200).json({ received: true });
+
+    const body = req.body || {};
+    const { call_sid, twilio_call_sid, CallSid, campaign_id, contact_id } = body;
+    const sid = normalizeTwilioCallSid(call_sid || twilio_call_sid || CallSid);
+    const callIdNorm = normalizeCallId(call_id);
+    const leadIdStr = lead_id != null ? String(lead_id).trim() : "";
+
+    logger.info("Twilio mapping received", {
+        call_sid: sid || null,
+        call_id: callIdNorm || null,
+        lead_id: leadIdStr || null,
+        campaign_id: campaign_id || null,
+        contact_id: contact_id || null,
+    });
+
+    if (!sid) {
+        logger.warn("[TwilioMapping] Missing twilio_call_sid — skipping", req.body);
+        await logMissingCallMapping({
+            source: "twilio_mapping_endpoint",
+            reason: "missing_twilio_call_sid",
+            contact_id: contact_id ?? null,
+            campaign_id: campaign_id ?? null,
+            body_preview: previewPayload(req.body),
+        });
+        return;
+    }
+
+    const db = getDb();
+    const contactId = contact_id != null ? String(contact_id) : "";
+    const campaignId = campaign_id != null ? String(campaign_id) : "";
+    const targetCollection = resolveCollection({ contact_id: contactId });
+
+    try {
+        await registerTwilioCallSidMapping({
+            twilio_call_sid: sid,
+            campaign_id: campaignId,
+            contact_id: contactId,
+            collectionName: targetCollection,
+        });
+
+        const setPayload = {
+            "twilio.call_sid": sid,
+            "twilio.mappedAt": new Date().toISOString(),
+        };
+        if (campaignId) setPayload["twilio.campaign_id"] = campaignId;
+        if (contactId) setPayload["twilio.contact_id"] = contactId;
+
+        let linked = false;
+
+        if (leadIdStr) {
+            const r = await db.collection(targetCollection).updateOne({ lead_id: leadIdStr }, { $set: setPayload });
+            linked = r.matchedCount > 0;
+        }
+        if (!linked && callIdNorm) {
+            const r = await db.collection(targetCollection).updateOne({ call_id: callIdNorm }, { $set: setPayload });
+            linked = r.matchedCount > 0;
+        }
+        if (!linked && contactId && campaignId) {
+            try {
+                const r = await db.collection(targetCollection).updateOne(
+                    { contact_id: contactId, campaign_id: campaignId },
+                    { $set: setPayload },
+                    { sort: { updatedAt: -1 } }
+                );
+                linked = r.matchedCount > 0;
+            } catch (sortErr) {
+                const r = await db.collection(targetCollection).updateOne(
+                    { contact_id: contactId, campaign_id: campaignId },
+                    { $set: setPayload }
+                );
+                linked = r.matchedCount > 0;
+                if (sortErr.message && !/sort/i.test(String(sortErr.message))) {
+                    logger.warn("[TwilioMapping] contact/campaign link without sort", {
+                        error: sortErr.message,
+                    });
+                }
+            }
+        }
+
+        let anchored = false;
+        if (!linked) {
+            const mappingEvent = {
+                timestamp: new Date().toISOString(),
+                event_type: "twilio_mapping_received",
+                data: {
+                    twilio_call_sid: sid,
+                    campaign_id: campaignId || null,
+                    contact_id: contactId || null
+                },
+            };
+            anchored = await upsertTwilioAnchoredCallLog({
+                collectionName: targetCollection,
+                twilioCallSid: sid,
+                twilioSetFields: setPayload,
+                eventDoc: mappingEvent,
+                rootFromMapping: {
+                    campaign_id: campaignId,
+                    contact_id: contactId,
+                    lead_id: leadIdStr,
+                    call_id: callIdNorm || "",
+                },
+            });
+        }
+
+        logger.info("[TwilioMapping] Stored mapping", {
+            twilio_call_sid: sid,
+            contact_id: contactId || null,
+            collection: targetCollection,
+            linkedToCallLog: linked,
+            anchoredByCallSid: anchored,
+        });
+    } catch (err) {
+        logger.error("[TwilioMapping] Failed to store mapping", { error: err.message, twilio_call_sid: sid });
+    }
+});
+
+// ─── Twilio Call Status Update Endpoint ──────────────────────────────────────
+app.post("/twilio/call-status", async (req, res) => {
+    if (!verifyIngressAuth(req, { allowHmac: false, allowBearer: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
+        return res.status(401).json({ received: false, error: "unauthorized" });
+    }
+
+    const { CallSid, CallStatus, CallDuration, Timestamp } = req.body || {};
+    const missingFields = [];
+    if (!CallSid) missingFields.push("CallSid");
+    if (!CallStatus) missingFields.push("CallStatus");
+    if (!Timestamp) missingFields.push("Timestamp");
+    if (missingFields.length) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_required_fields",
+            missing: missingFields,
+        });
+    }
+
+    const status = String(CallStatus).trim();
+    const callSid = String(CallSid).trim();
+    const timestampValue = (() => {
+        if (typeof Timestamp === "number") return new Date(Timestamp);
+        const raw = String(Timestamp).trim();
+        if (/^[0-9]+$/.test(raw)) {
+            const numeric = Number(raw);
+            return new Date(numeric > 1e12 ? numeric : numeric * 1000);
+        }
+        return new Date(raw);
+    })();
+
+    if (!timestampValue || Number.isNaN(timestampValue.getTime())) {
+        return res.status(400).json({
+            received: false,
+            error: "invalid_timestamp",
+            details: "Timestamp must be a valid ISO 8601 string or Unix seconds/milliseconds value.",
+        });
+    }
+
+    const duration = CallDuration == null ? null : Number(CallDuration);
+    if (CallDuration != null && (!Number.isFinite(duration) || duration < 0)) {
+        return res.status(400).json({
+            received: false,
+            error: "invalid_duration",
+            details: "CallDuration must be a non-negative number.",
+        });
+    }
+
+    const normalizedCallSid = callSid;
+    const twilioMapping = await lookupTwilioCallSidMapping(normalizedCallSid);
+
+    const twilioSetFields = {
+        "twilio.call_sid": normalizedCallSid,
+        "twilio.status": status,
+        "twilio.timestamp": timestampValue.toISOString(),
+        "twilio.updatedAt": new Date().toISOString(),
+    };
+    if (duration != null) {
+        twilioSetFields["twilio.duration"] = duration;
+    }
+    if (status.toLowerCase() === "completed") {
+        twilioSetFields["twilio.completedAt"] = timestampValue.toISOString();
+    }
+
+    const eventDoc = buildTwilioStatusEvent({
+        CallSid: normalizedCallSid,
+        CallStatus: status,
+        CallDuration: duration,
+        timestampIso: timestampValue.toISOString(),
+    });
+
+    const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
+    const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
+    const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation";
+    const allCollections = [CALLLOGS_COLLECTION, TESTCALL_COLLECTION, INBOUNDCALLLOG_COLLECTION];
+
+    const mappedCallId = twilioMapping?.call_id ? String(twilioMapping.call_id).trim() : "";
+    const mappedLeadId = twilioMapping?.lead_id ? String(twilioMapping.lead_id).trim() : "";
+    const mappedCollection =
+        twilioMapping?.collectionName && allCollections.includes(String(twilioMapping.collectionName))
+            ? String(twilioMapping.collectionName)
+            : null;
+    const primaryCollection =
+        mappedCollection || resolveCollection({ contact_id: twilioMapping?.contact_id }) || CALLLOGS_COLLECTION;
+    const collectionsOrdered = [...new Set([primaryCollection, ...allCollections])];
+
+    const filtersForCollection = () => {
+        const filters = [];
+        filters.push({ "twilio.call_sid": normalizedCallSid });
+        if (mappedCallId) filters.push({ call_id: mappedCallId });
+        if (mappedLeadId) filters.push({ lead_id: mappedLeadId });
+        filters.push({ call_id: normalizedCallSid });
+        return filters;
+    };
+
+    let updated = false;
+    for (const collectionName of collectionsOrdered) {
+        for (const filter of filtersForCollection()) {
+            const ok = await mergeTwilioStatusIntoCallLog(
+                collectionName,
+                filter,
+                twilioSetFields,
+                eventDoc
+            );
+            if (ok) {
+                updated = true;
+                break;
+            }
+        }
+        if (updated) break;
+    }
+
+    if (!updated && twilioMapping) {
+        console.log(":::::::::::::::::::::::::::::::::::::::::::::::::::not updated:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::");
+        updated = await upsertTwilioAnchoredCallLog({
+            collectionName: primaryCollection,
+            twilioCallSid: normalizedCallSid,
+            twilioSetFields,
+            eventDoc,
+            rootFromMapping: {
+                campaign_id: twilioMapping.campaign_id,
+                contact_id: twilioMapping.contact_id,
+                lead_id: twilioMapping.lead_id,
+                call_id: mappedCallId,
+            },
+        });
+    }
+
+    if (!updated) {
+        console.log(":::::::::::::::::::::::::::::::::::::::::::::::::::not updated:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::");
+        logger.warn("[Twilio] Call status update received for unknown CallSid", {
+            CallSid: normalizedCallSid,
+            CallStatus: status,
+            Timestamp,
+            CallDuration,
+        });
+        return res.status(404).json({
+            received: false,
+            error: "call_record_not_found",
+            callSid: normalizedCallSid,
+        });
+    }
+
+    const db = getDb();
+    const mappedContactId = twilioMapping?.contact_id ? String(twilioMapping.contact_id).trim() : "";
+    const statusToApply = mapTwilioStatusToCallReceiveStatus(status);
+    if (mappedContactId && statusToApply != null) {
+        if (/^[a-fA-F0-9]{24}$/.test(mappedContactId)) {
+            try {
+                const result = await db.collection("contactprocessings").updateOne(
+                    { _id: new ObjectId(mappedContactId) },
+                    { $set: { callReceiveStatus: statusToApply, updatedAt: new Date() } }
+                );
+                if (result.matchedCount === 0) {
+                    logger.warn("[Twilio] Mapped contact_id not found for status sync", {
+                        CallSid: normalizedCallSid,
+                        contact_id: mappedContactId,
+                        status,
+                    });
+                } else {
+                    logger.info("[Twilio] contactprocessings status synced", {
+                        CallSid: normalizedCallSid,
+                        contact_id: mappedContactId,
+                        callReceiveStatus: statusToApply,
+                        twilioStatus: status,
+                    });
+                }
+            } catch (err) {
+                logger.error("[Twilio] Failed to sync contactprocessings status", {
+                    CallSid: normalizedCallSid,
+                    contact_id: mappedContactId,
+                    status,
+                    error: err.message,
+                });
+            }
+        } else {
+            logger.warn("[Twilio] Skipping status sync: contact_id is not a Mongo ObjectId", {
+                CallSid: normalizedCallSid,
+                contact_id: mappedContactId,
+                status,
+            });
+        }
+    }
+
+    logger.info("[Twilio] Call status updated", {
+        CallSid: normalizedCallSid,
+        CallStatus: status,
+        CallDuration: duration,
+        Timestamp: timestampValue.toISOString(),
+    });
+    return res.status(200).json({ received: true, updated: true });
 });
 
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
@@ -283,6 +629,7 @@ app.post("/api/inbound-mapping", async (req, res) => {
             phone: normalizePhone(from_number) || "",
             collectionName: INBOUNDCALLLOG_COLLECTION,
         });
+        console.log(">>> [InboundMapping] Call mapping registered for call_id:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::", call_id);
         await createCallLog({
             call_id,
             campaign_id: camp,
@@ -297,7 +644,6 @@ app.post("/api/inbound-mapping", async (req, res) => {
         logger.error("[InboundMapping] Failed to store mapping", { error: err.message });
     }
 });
-
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {

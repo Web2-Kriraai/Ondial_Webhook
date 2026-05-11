@@ -152,6 +152,53 @@ async function hasAnsweredFlag(callId, phoneRaw) {
     return false;
 }
 
+function normalizeTwilioCallSid(callSid) {
+    if (!callSid) return null;
+    const sid = String(callSid).trim();
+    return sid || null;
+}
+
+/**
+ * Store mapping for Twilio callback correlation:
+ * twilio CallSid -> { call_id, lead_id, campaign_id, contact_id }.
+ */
+async function registerTwilioCallSidMapping({
+    twilio_call_sid,
+    campaign_id,
+    contact_id,
+    collectionName,
+}) {
+    const sid = normalizeTwilioCallSid(twilio_call_sid);
+    if (!sid) {
+        logger.warn("[CallMapping] Invalid twilio_call_sid, cannot store mapping");
+        return;
+    }
+
+    const entry = {
+        twilio_call_sid: sid,
+        campaign_id: String(campaign_id || ""),
+        contact_id: String(contact_id || ""),
+        collectionName: collectionName ? String(collectionName) : "",
+        updatedAt: Date.now(),
+    };
+
+    const redis = getRedis();
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(`map:twilio:sid:${sid}`, JSON.stringify(entry), "EX", ttlSec);
+    logger.info("[CallMapping] Stored Twilio SID mapping", {
+        twilio_call_sid: sid,
+        contact_id: entry.contact_id,
+    });
+}
+
+async function lookupTwilioCallSidMapping(twilioCallSid) {
+    const sid = normalizeTwilioCallSid(twilioCallSid);
+    if (!sid) return null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:twilio:sid:${sid}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
 module.exports = {
     registerCallMapping,
     lookupMapping,
@@ -161,4 +208,7 @@ module.exports = {
     normalizePhone,
     markCallAnswered,
     hasAnsweredFlag,
+    registerTwilioCallSidMapping,
+    lookupTwilioCallSidMapping,
+    normalizeTwilioCallSid,
 };
