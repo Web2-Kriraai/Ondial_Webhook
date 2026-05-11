@@ -238,7 +238,7 @@ app.post("/api/twilio-mapping", async (req, res) => {
     res.status(200).json({ received: true });
 
     const body = req.body || {};
-    const { call_sid, twilio_call_sid, CallSid, campaign_id, contact_id } = body;
+    const { call_sid, twilio_call_sid, CallSid, call_id, lead_id, campaign_id, contact_id } = body;
     const sid = normalizeTwilioCallSid(call_sid || twilio_call_sid || CallSid);
     const callIdNorm = normalizeCallId(call_id);
     const leadIdStr = lead_id != null ? String(lead_id).trim() : "";
