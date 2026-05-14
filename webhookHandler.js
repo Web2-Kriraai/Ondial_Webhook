@@ -7,6 +7,7 @@ const {
     lookupMappingByPhone,
     enrichPhoneMapping,
     normalizeCallId,
+    normalizePhone,
     markCallAnswered,
     hasAnsweredFlag,
 } = require("./callMapping");
@@ -212,28 +213,67 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "") {
     });
 }
 
-async function didCallReachAnsweredStage({ leadId, callId, collectionName }) {
+function eventCallIdFromPayload(ev) {
+    return normalizeCallId(ev?.data?.call_id ?? ev?.data?.Call_UniqueId);
+}
+
+/**
+ * Events for this outbound dial only. Outbound CallLogs are keyed by lead_id and accumulate
+ * many calls; without scoping, an old call_answered would make BUSY/no-answer look "completed".
+ */
+function sliceEventsForThisCallLeg(events, normalizedCallId) {
+    if (!normalizedCallId || !Array.isArray(events) || events.length === 0) return [];
+    let start = -1;
+    for (let i = 0; i < events.length; i++) {
+        const e = events[i];
+        const ty = String(e?.event_type || "").toLowerCase();
+        if (ty === "call_initiated" && eventCallIdFromPayload(e) === normalizedCallId) {
+            start = i;
+        }
+    }
+    if (start === -1) {
+        for (let i = 0; i < events.length; i++) {
+            if (eventCallIdFromPayload(events[i]) === normalizedCallId) {
+                start = i;
+                break;
+            }
+        }
+    }
+    if (start === -1) return [];
+    return events.slice(start);
+}
+
+async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPhone }) {
     try {
         const db = getDb();
+        const normalized = normalizeCallId(callId);
+        if (!normalized) return false;
+
         const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
         let doc = null;
 
         if (isInbound) {
-            const normalizedCallId = normalizeCallId(callId);
-            if (!normalizedCallId) return false;
             doc = await db.collection(collectionName).findOne(
-                { call_id: normalizedCallId },
-                { projection: { "call_data.events.event_type": 1 } }
+                { call_id: normalized },
+                { projection: { "call_data.events": 1 } }
             );
         } else if (hasLeadId(leadId)) {
             doc = await db.collection(collectionName || "CallLogs").findOne(
                 { lead_id: String(leadId) },
-                { projection: { "call_data.events.event_type": 1 } }
+                { projection: { "call_data.events": 1 } }
             );
         }
 
         const events = Array.isArray(doc?.call_data?.events) ? doc.call_data.events : [];
-        return events.some((e) => String(e?.event_type || "").toLowerCase() === "call_answered");
+        const slice = isInbound ? events : sliceEventsForThisCallLeg(events, normalized);
+        const normTo = toPhone ? normalizePhone(toPhone) : null;
+
+        return slice.some((e) => {
+            if (String(e?.event_type || "").toLowerCase() !== "call_answered") return false;
+            if (eventCallIdFromPayload(e) === normalized) return true;
+            if (normTo && normalizePhone(e?.data?.to) === normTo) return true;
+            return false;
+        });
     } catch (err) {
         logger.warn(`[Webhook] didCallReachAnsweredStage lookup failed: ${err.message}`);
         return false;
@@ -315,6 +355,7 @@ async function handleEventWebhook(body) {
                     leadId: lead_id,
                     callId: call_id,
                     collectionName,
+                    toPhone: to,
                 }));
             const hangupStatus = answeredStageSeen ? 3 : 1;
             await updateStatus(
@@ -370,6 +411,7 @@ async function handleSummaryWebhook(body) {
             leadId: lead_id,
             callId: Call_UniqueId,
             collectionName,
+            toPhone: To_number,
         }));
 
     let newStatus;

@@ -129,13 +129,16 @@ async function markCallAnswered(callId, phoneRaw) {
         await redis.set(`map:answered:${cid}`, "1", "EX", ttlSec);
     }
     const phoneKey = normalizePhone(phoneRaw);
-    if (phoneKey) {
-        await redis.set(`map:answered:phone:${phoneKey}`, "1", "EX", ttlSec);
+    if (phoneKey && cid) {
+        // Store the answered leg's call_id so later dials to the same mobile do not
+        // inherit a stale "answered" signal (legacy value "1" matched any call).
+        await redis.set(`map:answered:phone:${phoneKey}`, cid, "EX", ttlSec);
     }
 }
 
 /**
- * True if call_answered was recorded for this call_id or normalized destination phone.
+ * True if this specific call_id was marked answered (Redis), or the phone key
+ * holds the same normalized call_id (cross-id leg match without legacy blanket "1").
  */
 async function hasAnsweredFlag(callId, phoneRaw) {
     const redis = getRedis();
@@ -145,9 +148,12 @@ async function hasAnsweredFlag(callId, phoneRaw) {
         if (v === "1") return true;
     }
     const phoneKey = normalizePhone(phoneRaw);
-    if (phoneKey) {
+    if (phoneKey && cid) {
         const v = await redis.get(`map:answered:phone:${phoneKey}`);
-        if (v === "1") return true;
+        if (!v) return false;
+        // Ignore legacy blanket "1" — it caused false "completed" on new dials to the same number.
+        if (v === "1") return false;
+        return normalizeCallId(v) === cid;
     }
     return false;
 }
