@@ -30,18 +30,31 @@ function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIs
 
 /**
  * Applies Twilio snapshot fields and appends one call_data event (single round-trip).
+ * Pipeline tolerates rows missing call_data (legacy or partial writes).
  */
 async function mergeTwilioStatusIntoCallLog(collectionName, filter, twilioSetFields, eventDoc) {
     const db = getDb();
-    const result = await db.collection(collectionName).updateOne(filter, {
-        $set: { ...twilioSetFields, updatedAt: new Date() },
-        $addToSet: { "call_data.events": eventDoc },
-    });
+    const rootSet = { ...twilioSetFields, updatedAt: new Date() };
+    const pipeline = [
+        { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
+        { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+        { $set: rootSet },
+        {
+            $set: {
+                "call_data.events": {
+                    $concatArrays: [{ $ifNull: ["$call_data.events", []] }, [eventDoc]],
+                },
+            },
+        },
+    ];
+    const result = await db.collection(collectionName).updateOne(filter, pipeline);
     return result.matchedCount > 0;
 }
 
 /**
- * Creates or updates the Twilio-anchored CallLog row (exactly one doc per CallSid in that collection).
+ * One MongoDB document per Twilio CallSid. lead_id is always `twilio:<CallSid>` so the same
+ * contact_id / campaign can have many Twilio retries without colliding with the partial unique
+ * index on CRM lead_id. Optional dialer ids are stored on twilio.external_* when provided.
  */
 async function upsertTwilioAnchoredCallLog({
     collectionName,
@@ -54,44 +67,30 @@ async function upsertTwilioAnchoredCallLog({
     const filter = { "twilio.call_sid": twilioCallSid };
     const campaignId = rootFromMapping.campaign_id != null ? String(rootFromMapping.campaign_id) : "";
     const contactId = rootFromMapping.contact_id != null ? String(rootFromMapping.contact_id) : "";
-    const leadId = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
-    const callId =
-        rootFromMapping.call_id != null && String(rootFromMapping.call_id).trim()
-            ? String(rootFromMapping.call_id).trim()
-            : twilioCallSid;
-    const effectiveLeadId = leadId || `twilio:${twilioCallSid}`;
+    const externalLead = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
+    const externalCallRaw = rootFromMapping.call_id != null ? String(rootFromMapping.call_id).trim() : "";
+    const externalCall = externalCallRaw ? normalizeCallId(externalCallRaw) || externalCallRaw : "";
 
-    logger.info("[upsertTwilioAnchoredCallLog] Starting upsert", {
-        collection: collectionName,
-        filter,
-        callId,
-        campaignId,
-        contactId,
-        leadId: leadId || null,
-        effectiveLeadId,
-        twilioSetFields: Object.keys(twilioSetFields),
-    });
+    const syntheticLeadId = `twilio:${twilioCallSid}`;
 
     const $set = {
         ...twilioSetFields,
         "twilio.call_sid": twilioCallSid,
+        lead_id: syntheticLeadId,
+        call_id: twilioCallSid,
+        call_direction: "outbound",
         updatedAt: new Date(),
     };
     if (campaignId) $set.campaign_id = campaignId;
     if (contactId) $set.contact_id = contactId;
-    if (effectiveLeadId) $set.lead_id = effectiveLeadId;
-    if (callId) $set.call_id = callId;
+    if (externalLead) $set["twilio.external_lead_id"] = externalLead;
+    if (externalCall) $set["twilio.external_call_id"] = externalCall;
 
     const $setOnInsert = {
         createdAt: new Date().toISOString(),
         recordingUrl: "",
+        call_data: { events: [] },
     };
-
-    logger.info("[upsertTwilioAnchoredCallLog] Update document structure", {
-        $set: Object.keys($set),
-        $setOnInsert: Object.keys($setOnInsert),
-        addToSetField: "call_data.events",
-    });
 
     try {
         const result = await db.collection(collectionName).updateOne(
@@ -99,16 +98,10 @@ async function upsertTwilioAnchoredCallLog({
             {
                 $set,
                 $setOnInsert,
-                $addToSet: { "call_data.events": eventDoc },
+                $push: { "call_data.events": eventDoc },
             },
             { upsert: true }
         );
-
-        logger.info("[upsertTwilioAnchoredCallLog] Upsert result", {
-            upsertedCount: result.upsertedCount,
-            modifiedCount: result.modifiedCount,
-            matchedCount: result.matchedCount,
-        });
 
         return result.upsertedCount > 0 || result.modifiedCount > 0 || result.matchedCount > 0;
     } catch (err) {

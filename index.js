@@ -263,7 +263,6 @@ app.post("/api/twilio-mapping", async (req, res) => {
         return;
     }
 
-    const db = getDb();
     const contactId = contact_id != null ? String(contact_id) : "";
     const campaignId = campaign_id != null ? String(campaign_id) : "";
     const targetCollection = resolveCollection({ contact_id: contactId });
@@ -271,6 +270,8 @@ app.post("/api/twilio-mapping", async (req, res) => {
     try {
         await registerTwilioCallSidMapping({
             twilio_call_sid: sid,
+            call_id: callIdNorm || "",
+            lead_id: leadIdStr,
             campaign_id: campaignId,
             contact_id: contactId,
             collectionName: targetCollection,
@@ -283,69 +284,35 @@ app.post("/api/twilio-mapping", async (req, res) => {
         if (campaignId) setPayload["twilio.campaign_id"] = campaignId;
         if (contactId) setPayload["twilio.contact_id"] = contactId;
 
-        let linked = false;
-
-        if (leadIdStr) {
-            const r = await db.collection(targetCollection).updateOne({ lead_id: leadIdStr }, { $set: setPayload });
-            linked = r.matchedCount > 0;
-        }
-        if (!linked && callIdNorm) {
-            const r = await db.collection(targetCollection).updateOne({ call_id: callIdNorm }, { $set: setPayload });
-            linked = r.matchedCount > 0;
-        }
-        if (!linked && contactId && campaignId) {
-            try {
-                const r = await db.collection(targetCollection).updateOne(
-                    { contact_id: contactId, campaign_id: campaignId },
-                    { $set: setPayload },
-                    { sort: { updatedAt: -1 } }
-                );
-                linked = r.matchedCount > 0;
-            } catch (sortErr) {
-                const r = await db.collection(targetCollection).updateOne(
-                    { contact_id: contactId, campaign_id: campaignId },
-                    { $set: setPayload }
-                );
-                linked = r.matchedCount > 0;
-                if (sortErr.message && !/sort/i.test(String(sortErr.message))) {
-                    logger.warn("[TwilioMapping] contact/campaign link without sort", {
-                        error: sortErr.message,
-                    });
-                }
-            }
-        }
-
-        let anchored = false;
-        if (!linked) {
-            const mappingEvent = {
-                timestamp: new Date().toISOString(),
-                event_type: "twilio_mapping_received",
-                data: {
-                    twilio_call_sid: sid,
-                    campaign_id: campaignId || null,
-                    contact_id: contactId || null
-                },
-            };
-            anchored = await upsertTwilioAnchoredCallLog({
-                collectionName: targetCollection,
-                twilioCallSid: sid,
-                twilioSetFields: setPayload,
-                eventDoc: mappingEvent,
-                rootFromMapping: {
-                    campaign_id: campaignId,
-                    contact_id: contactId,
-                    lead_id: leadIdStr,
-                    call_id: callIdNorm || "",
-                },
-            });
-        }
+        const mappingEvent = {
+            timestamp: new Date().toISOString(),
+            event_type: "twilio_mapping_received",
+            data: {
+                twilio_call_sid: sid,
+                campaign_id: campaignId || null,
+                contact_id: contactId || null,
+                lead_id: leadIdStr || null,
+                call_id: callIdNorm || null,
+            },
+        };
+        const anchored = await upsertTwilioAnchoredCallLog({
+            collectionName: targetCollection,
+            twilioCallSid: sid,
+            twilioSetFields: setPayload,
+            eventDoc: mappingEvent,
+            rootFromMapping: {
+                campaign_id: campaignId,
+                contact_id: contactId,
+                lead_id: leadIdStr,
+                call_id: callIdNorm || "",
+            },
+        });
 
         logger.info("[TwilioMapping] Stored mapping", {
             twilio_call_sid: sid,
             contact_id: contactId || null,
             collection: targetCollection,
-            linkedToCallLog: linked,
-            anchoredByCallSid: anchored,
+            callLogPerCallSid: anchored,
         });
     } catch (err) {
         logger.error("[TwilioMapping] Failed to store mapping", { error: err.message, twilio_call_sid: sid });
@@ -429,7 +396,6 @@ app.post("/twilio/call-status", async (req, res) => {
     const allCollections = [CALLLOGS_COLLECTION, TESTCALL_COLLECTION, INBOUNDCALLLOG_COLLECTION];
 
     const mappedCallId = twilioMapping?.call_id ? String(twilioMapping.call_id).trim() : "";
-    const mappedLeadId = twilioMapping?.lead_id ? String(twilioMapping.lead_id).trim() : "";
     const mappedCollection =
         twilioMapping?.collectionName && allCollections.includes(String(twilioMapping.collectionName))
             ? String(twilioMapping.collectionName)
@@ -438,14 +404,8 @@ app.post("/twilio/call-status", async (req, res) => {
         mappedCollection || resolveCollection({ contact_id: twilioMapping?.contact_id }) || CALLLOGS_COLLECTION;
     const collectionsOrdered = [...new Set([primaryCollection, ...allCollections])];
 
-    const filtersForCollection = () => {
-        const filters = [];
-        filters.push({ "twilio.call_sid": normalizedCallSid });
-        if (mappedCallId) filters.push({ call_id: mappedCallId });
-        if (mappedLeadId) filters.push({ lead_id: mappedLeadId });
-        filters.push({ call_id: normalizedCallSid });
-        return filters;
-    };
+    /** One doc per CallSid — never merge Twilio events into Indian CRM lead_id rows. */
+    const filtersForCollection = () => [{ "twilio.call_sid": normalizedCallSid }];
 
     let updated = false;
     for (const collectionName of collectionsOrdered) {
@@ -465,7 +425,6 @@ app.post("/twilio/call-status", async (req, res) => {
     }
 
     if (!updated && twilioMapping) {
-        console.log(":::::::::::::::::::::::::::::::::::::::::::::::::::not updated:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::");
         updated = await upsertTwilioAnchoredCallLog({
             collectionName: primaryCollection,
             twilioCallSid: normalizedCallSid,
@@ -481,7 +440,6 @@ app.post("/twilio/call-status", async (req, res) => {
     }
 
     if (!updated) {
-        console.log(":::::::::::::::::::::::::::::::::::::::::::::::::::not updated:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::");
         logger.warn("[Twilio] Call status update received for unknown CallSid", {
             CallSid: normalizedCallSid,
             CallStatus: status,

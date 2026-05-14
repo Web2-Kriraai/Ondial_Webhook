@@ -170,6 +170,8 @@ function normalizeTwilioCallSid(callSid) {
  */
 async function registerTwilioCallSidMapping({
     twilio_call_sid,
+    call_id,
+    lead_id,
     campaign_id,
     contact_id,
     collectionName,
@@ -182,6 +184,8 @@ async function registerTwilioCallSidMapping({
 
     const entry = {
         twilio_call_sid: sid,
+        call_id: String(call_id || ""),
+        lead_id: String(lead_id || ""),
         campaign_id: String(campaign_id || ""),
         contact_id: String(contact_id || ""),
         collectionName: collectionName ? String(collectionName) : "",
