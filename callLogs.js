@@ -89,7 +89,6 @@ async function upsertTwilioAnchoredCallLog({
     const $setOnInsert = {
         createdAt: new Date().toISOString(),
         recordingUrl: "",
-        call_data: { events: [] },
     };
 
     try {
@@ -98,6 +97,8 @@ async function upsertTwilioAnchoredCallLog({
             {
                 $set,
                 $setOnInsert,
+                // Do not $setOnInsert call_data here — same update uses $push on call_data.events
+                // and MongoDB rejects that combination (path conflict at call_data).
                 $push: { "call_data.events": eventDoc },
             },
             { upsert: true }
