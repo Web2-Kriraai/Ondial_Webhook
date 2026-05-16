@@ -11,7 +11,11 @@ const {
     markCallAnswered,
     hasAnsweredFlag,
 } = require("./callMapping");
-const { appendCallEvent, INBOUNDCALLLOG_COLLECTION } = require("./callLogs");
+const {
+    appendCallEvent,
+    INBOUNDCALLLOG_COLLECTION,
+    markInboundConversationCompleted,
+} = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
@@ -366,15 +370,20 @@ async function handleEventWebhook(body) {
             );
             // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
             if (isInboundLog && docKey) {
+                await markInboundConversationCompleted(docKey);
                 await notifyOndialInboundWebhook(docKey);
             }
             break;
         }
 
-        case "call_failed":
+        case "call_failed": {
+            if (isInboundLog && docKey) {
+                await markInboundConversationCompleted(docKey);
+            }
             // Technical failure (network, provider error) — status=0
             await updateStatus(call_id, to, 0, event);
             break;
+        }
 
         default:
             logger.info(`[Webhook] Unhandled event: ${event}`);
@@ -446,6 +455,7 @@ async function handleSummaryWebhook(body) {
             collectionName,
             callId: cdrCallKey,
         });
+        await markInboundConversationCompleted(cdrCallKey);
         await notifyOndialInboundWebhook(cdrCallKey);
     } else {
         await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });

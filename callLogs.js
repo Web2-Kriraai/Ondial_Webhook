@@ -6,6 +6,10 @@ const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
 const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation";
 
+/** Top-level lifecycle on InboundConversation only (not Twilio / CallLogs). */
+const INBOUND_CONVERSATION_STATUS_ACTIVE = "active";
+const INBOUND_CONVERSATION_STATUS_COMPLETED = "completed";
+
 function resolveCollection({ contact_id }) {
     if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
         return TESTCALL_COLLECTION;
@@ -118,6 +122,44 @@ async function upsertTwilioAnchoredCallLog({
 const pendingStubs = new Set();
 
 /**
+ * InboundConversation: mark call as live. Skips if already completed (no extra write when matchedCount 0).
+ */
+async function markInboundConversationActive(normalizedCallId) {
+    if (!normalizedCallId) return;
+    try {
+        const db = getDb();
+        await db.collection(INBOUNDCALLLOG_COLLECTION).updateOne(
+            { call_id: normalizedCallId, status: { $ne: INBOUND_CONVERSATION_STATUS_COMPLETED } },
+            { $set: { status: INBOUND_CONVERSATION_STATUS_ACTIVE, updatedAt: new Date() } }
+        );
+    } catch (err) {
+        logger.error("[CallLog] markInboundConversationActive failed", {
+            error: err.message,
+            call_id: normalizedCallId,
+        });
+    }
+}
+
+/**
+ * InboundConversation: terminal state after hangup / CDR / failure. Idempotent.
+ */
+async function markInboundConversationCompleted(normalizedCallId) {
+    if (!normalizedCallId) return;
+    try {
+        const db = getDb();
+        await db.collection(INBOUNDCALLLOG_COLLECTION).updateOne(
+            { call_id: normalizedCallId },
+            { $set: { status: INBOUND_CONVERSATION_STATUS_COMPLETED, updatedAt: new Date() } }
+        );
+    } catch (err) {
+        logger.error("[CallLog] markInboundConversationCompleted failed", {
+            error: err.message,
+            call_id: normalizedCallId,
+        });
+    }
+}
+
+/**
  * Outbound / test: keyed by lead_id.
  * Inbound (InboundConversation): keyed by call_id only — no lead_id stored.
  */
@@ -145,6 +187,7 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                 } else {
                     logger.info(`[CallLog] Inbound doc exists call_id=${key}`);
                 }
+                await markInboundConversationActive(key);
                 return;
             }
 
@@ -159,6 +202,7 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                         createdAt: new Date().toISOString(),
                         recordingUrl: "",
                         call_data: { events: [] },
+                        status: INBOUND_CONVERSATION_STATUS_ACTIVE,
                     },
                 },
                 { upsert: true }
@@ -275,6 +319,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
                           call_direction: "inbound",
                           createdAt: new Date().toISOString(),
                           call_data: { events: [] },
+                          status: INBOUND_CONVERSATION_STATUS_ACTIVE,
                       }
                     : {
                           lead_id: String(lead_id),
@@ -322,6 +367,8 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
 module.exports = {
     createCallLog,
     appendCallEvent,
+    markInboundConversationActive,
+    markInboundConversationCompleted,
     INBOUNDCALLLOG_COLLECTION,
     resolveCollection,
     buildTwilioStatusEvent,
