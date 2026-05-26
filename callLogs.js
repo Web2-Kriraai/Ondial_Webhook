@@ -119,8 +119,6 @@ async function upsertTwilioAnchoredCallLog({
     }
 }
 
-const pendingStubs = new Set();
-
 /**
  * InboundConversation: mark call as live. Skips if already completed (no extra write when matchedCount 0).
  */
@@ -251,13 +249,19 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
     }
 }
 
+/**
+ * Pipeline upsert: creates the doc if missing, appends one event to call_data.events,
+ * and lazy-fills identity fields via $ifNull so existing values are never overwritten.
+ *
+ * No more separate "stub creation" path — single round-trip, no path-conflict bugs,
+ * no recursive retries, no in-memory pending-stub set.
+ */
 async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = null, options = {}) {
     const resolvedCollectionName =
         options.collectionName || resolveCollection({ contact_id: options.contact_id });
     const inbound = resolvedCollectionName === INBOUNDCALLLOG_COLLECTION;
 
     let docFilter;
-    let stubKey;
     let logLabel;
 
     if (inbound) {
@@ -269,30 +273,59 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             return;
         }
         docFilter = { call_id: cid };
-        stubKey = `inbound:${cid}`;
         logLabel = `call_id=${cid}`;
     } else {
         if (!lead_id) return;
         docFilter = { lead_id: String(lead_id) };
-        stubKey = String(lead_id);
         logLabel = `lead_id=${lead_id}`;
     }
 
     try {
         const db = getDb();
-        const collectionName = resolvedCollectionName;
 
         const newEvent = {
             timestamp: new Date().toISOString(),
             event_type: event_type,
             data: eventData,
         };
+        if (recordingUrl) newEvent.recordingUrl = recordingUrl;
 
-        if (recordingUrl) {
-            newEvent.recordingUrl = recordingUrl;
+        // With aggregation-pipeline upsert, MongoDB does NOT inject filter fields into the new
+        // document. We must set every identity field explicitly so the doc is queryable on
+        // the next event. We use $ifNull so existing values on update are never overwritten.
+        const identitySet = {
+            createdAt: { $ifNull: ["$createdAt", new Date().toISOString()] },
+            updatedAt: new Date(),
+        };
+        if (inbound) {
+            // call_id IS the filter key — must always be present.
+            identitySet.call_id = docFilter.call_id;
+            identitySet.call_direction = { $ifNull: ["$call_direction", "inbound"] };
+            identitySet.status = { $ifNull: ["$status", INBOUND_CONVERSATION_STATUS_ACTIVE] };
+            if (options.contact_id) {
+                identitySet.contact_id = { $ifNull: ["$contact_id", String(options.contact_id)] };
+            }
+            if (options.campaign_id) {
+                identitySet.config_id = { $ifNull: ["$config_id", String(options.campaign_id)] };
+            }
+        } else {
+            // lead_id IS the filter key — must always be present.
+            identitySet.lead_id = String(lead_id);
+            if (options.contact_id) {
+                identitySet.contact_id = { $ifNull: ["$contact_id", String(options.contact_id)] };
+            }
+            if (options.campaign_id) {
+                identitySet.campaign_id = { $ifNull: ["$campaign_id", String(options.campaign_id)] };
+            }
+            if (options.callId) {
+                identitySet.call_id = { $ifNull: ["$call_id", String(options.callId)] };
+            }
         }
 
+        // Separate stages avoid the "Updating path 'call_data.events' would create a conflict
+        // at 'call_data'" error: each stage's output is the input to the next.
         const pipeline = [
+            { $set: identitySet },
             { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
             { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
             { $set: { "call_data.events": { $concatArrays: ["$call_data.events", [newEvent]] } } },
@@ -301,66 +334,21 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             pipeline.push({ $set: { recordingUrl } });
         }
 
-        let result = await db.collection(collectionName).updateOne(docFilter, pipeline);
+        const result = await db
+            .collection(resolvedCollectionName)
+            .updateOne(docFilter, pipeline, { upsert: true });
 
-        if (result.matchedCount === 0) {
-            if (pendingStubs.has(stubKey)) {
-                await new Promise((r) => setTimeout(r, 250));
-                return appendCallEvent(lead_id, event_type, eventData, recordingUrl, options);
-            }
-
-            pendingStubs.add(stubKey);
-            logger.warn(`[CallLog] No doc for ${logLabel} — creating stub`);
-
-            try {
-                const onInsert = inbound
-                    ? {
-                          call_id: docFilter.call_id,
-                          call_direction: "inbound",
-                          createdAt: new Date().toISOString(),
-                          call_data: { events: [] },
-                          status: INBOUND_CONVERSATION_STATUS_ACTIVE,
-                      }
-                    : {
-                          lead_id: String(lead_id),
-                          createdAt: new Date().toISOString(),
-                          call_data: { events: [] },
-                      };
-
-                await db.collection(collectionName).updateOne(
-                    docFilter,
-                    {
-                        $setOnInsert: onInsert,
-                        $addToSet: { "call_data.events": newEvent },
-                        ...(recordingUrl ? { $set: { recordingUrl } } : {}),
-                    },
-                    { upsert: true }
-                );
-                logger.info(`[CallLog] Stub created and event '${event_type}' stored for ${logLabel}`);
-            } finally {
-                pendingStubs.delete(stubKey);
-            }
-            return;
-        }
-
-        logger.info(`[CallLog] Appended event '${event_type}' to ${logLabel}`);
-    } catch (err) {
-        if (err.message?.includes("call_data")) {
-            try {
-                const db = getDb();
-                await db.collection(resolvedCollectionName).updateOne(docFilter, {
-                    $set: { call_data: { events: [] } },
-                });
-                await appendCallEvent(lead_id, event_type, eventData, recordingUrl, options);
-            } catch (retryErr) {
-                logger.error(`[CallLog] appendCallEvent retry failed: ${retryErr.message}`, {
-                    logLabel,
-                    event_type,
-                });
-            }
+        if (result.upsertedCount > 0) {
+            logger.info(`[CallLog] Created doc and stored event '${event_type}' for ${logLabel}`);
+        } else if (result.modifiedCount > 0) {
+            logger.info(`[CallLog] Appended event '${event_type}' to ${logLabel}`);
         } else {
-            logger.error(`[CallLog] appendCallEvent failed: ${err.message}`, { logLabel, event_type });
+            logger.warn(
+                `[CallLog] appendCallEvent matched but did not modify (${logLabel}, event=${event_type})`
+            );
         }
+    } catch (err) {
+        logger.error(`[CallLog] appendCallEvent failed: ${err.message}`, { logLabel, event_type });
     }
 }
 

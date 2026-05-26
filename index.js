@@ -191,41 +191,10 @@ app.get("/api/v1/sse/listen", (req, res) => {
 });
 
 
-// ─── FLOW 2: Call Mapping Endpoint ───────────────────────────────────────────
-// Receives: { lead_id, call_id, campaign_id, contact_id }
-// Called automatically by the telephony server ~1-2s after call is initiated.
-app.post("/api/call-mapping", async (req, res) => {
-    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
-    //     return res.status(401).json({ received: false, error: "unauthorized_mapping_ingress" });
-    // }
-    res.status(200).json({ received: true });
-
-    const { lead_id, call_id, campaign_id, contact_id } = req.body;
-
-    logger.info("Call mapping received", { lead_id, call_id, campaign_id, contact_id });
-
-    if (!call_id || !contact_id) {
-        logger.warn("[CallMapping] Missing call_id or contact_id — skipping", req.body);
-        await logMissingCallMapping({
-            source: "call_mapping_endpoint",
-            reason: "missing_call_id_or_contact_id",
-            lead_id: lead_id ?? null,
-            call_id: call_id ?? null,
-            contact_id: contact_id ?? null,
-            campaign_id: campaign_id ?? null,
-            body_preview: previewPayload(req.body),
-        });
-        return;
-    }
-
-    try {
-        await registerCallMapping({ lead_id, call_id, campaign_id, contact_id });
-        // Create calllogs document immediately so events can be appended as they arrive
-        await createCallLog({ lead_id, call_id, campaign_id, contact_id });
-    } catch (err) {
-        logger.error("[CallMapping] Failed to store mapping", { error: err.message });
-    }
-});
+// NOTE: /api/call-mapping has been removed.
+// The telephony webhook now carries `customParameters.{contact_id, campaign_id, call_unique_id}`
+// (normalized in webhookHandler), so identity is resolved directly from the webhook payload.
+// Inbound mapping (/api/inbound-mapping) and Twilio mapping (/api/twilio-mapping) remain.
 
 // ─── FLOW 2B: Twilio SID Mapping Endpoint ───────────────────────────────────
 // Receives: { call_sid | twilio_call_sid | CallSid, call_id?, lead_id?, campaign_id, contact_id }

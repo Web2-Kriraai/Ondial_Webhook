@@ -63,10 +63,25 @@ async function updateByContactId(contactId, newStatus, context = "") {
                     ]
                 }
                 : { _id: oid };
+
+            console.log("[Webhook] updating callReceiveStatus", {
+                contact_id: cid,
+                newStatus,
+                context,
+            });
+
             const result = await db.collection("contactprocessings").updateOne(
                 filter,
                 { $set: { callReceiveStatus: newStatus, updatedAt: new Date() } }
             );
+
+            console.log("[Webhook] callReceiveStatus update result", {
+                contact_id: cid,
+                matchedCount: result.matchedCount,
+                modifiedCount: result.modifiedCount,
+                newStatus,
+            });
+
             if (result.matchedCount === 0) {
                 const current = await db.collection("contactprocessings").findOne(
                     { _id: oid },
@@ -160,25 +175,65 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
     }
 }
 
+/** Returns the first non-empty trimmed string from the arguments, else null. */
+function pickNonEmpty(...values) {
+    for (const v of values) {
+        if (v == null) continue;
+        const s = String(v).trim();
+        if (s !== "") return s;
+    }
+    return null;
+}
+
+/**
+ * Payload-first identity resolver.
+ *
+ * New outbound flow: telephony webhook payload itself carries `contact_id`, `campaign_id`,
+ * and `call_unique_id` (alias of `call_id`), so we no longer require /api/call-mapping.
+ * Redis mapping is still consulted as a fallback so:
+ *   - legacy /api/call-mapping callers keep working unchanged,
+ *   - inbound flag (collectionName === InboundConversation) keeps coming from /api/inbound-mapping.
+ */
+function resolveIdentityFromPayload(body, mapping) {
+    const rawCallId = body?.call_id ?? body?.Call_UniqueId ?? body?.call_unique_id;
+    return {
+        callId: rawCallId,
+        normalizedCallId: normalizeCallId(rawCallId),
+        contact_id: pickNonEmpty(body?.contact_id, mapping?.contact_id),
+        campaign_id: pickNonEmpty(body?.campaign_id, mapping?.campaign_id),
+        lead_id: pickNonEmpty(body?.lead_id, mapping?.lead_id),
+        collectionName: mapping?.collectionName || null,
+    };
+}
+
 /**
  * Resolve the contact from a webhook event:
- *   1. Lookup by call_id in Redis mapping (exact match)
- *   2. Lookup by phone in Redis mapping (handles Asterisk call_id change on answer)
- *      — skipped when step 1 already resolved an inbound log mapping (avoid wrong merge)
- *   3. Fallback: DB phone scan (last resort — outbound only; never for inbound-only mapping)
+ *   - If caller provides `precomputed` (payload-first identity), use it directly to avoid Redis lookups.
+ *   - Else fall back to legacy mapping resolution:
+ *       1. Lookup by call_id in Redis mapping
+ *       2. Lookup by phone in Redis mapping
+ *       3. DB phone scan
  */
-async function updateStatus(callId, mobileRaw, newStatus, context = "") {
-    let mapping = await lookupMapping(callId);
-    const inboundByCallId = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
+async function updateStatus(callId, mobileRaw, newStatus, context = "", precomputed = null) {
+    let contact_id = precomputed?.contact_id || null;
+    let campaign_id = precomputed?.campaign_id || null;
+    let collectionName = precomputed?.collectionName || null;
 
-    if (!mapping?.contact_id && mobileRaw && !inboundByCallId) {
-        const byPhone = await lookupMappingByPhone(mobileRaw);
-        if (byPhone) mapping = byPhone;
+    if (!contact_id) {
+        let mapping = await lookupMapping(callId);
+        const inboundByCallId = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
+
+        if (!mapping?.contact_id && mobileRaw && !inboundByCallId) {
+            const byPhone = await lookupMappingByPhone(mobileRaw);
+            if (byPhone) mapping = byPhone;
+        }
+
+        contact_id = mapping?.contact_id || null;
+        campaign_id = campaign_id || mapping?.campaign_id || null;
+        collectionName = collectionName || mapping?.collectionName || null;
     }
 
-    const contact_id = mapping?.contact_id;
-    const campaign_id = mapping?.campaign_id;
-    const isInboundMapping = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
+    const isInboundMapping = collectionName === INBOUNDCALLLOG_COLLECTION;
 
     if (contact_id) {
         const updateResult = await updateByContactId(contact_id, newStatus, context);
@@ -292,25 +347,53 @@ function hasLeadId(v) {
 
 async function handleEventWebhook(body) {
     const { event, call_id, to, duration } = body;
-    const mapping = (await lookupMapping(call_id)) || (await lookupMappingByPhone(to));
-    const lead_id = mapping?.lead_id || null;
-    const contact_id = mapping?.contact_id || null;
-    const collectionName = mapping?.collectionName || null;
-    const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
 
-    if (!hasLeadId(lead_id) && !isInboundLog) {
+    // Payload-first identity.
+    // - Skip phone-fallback Redis GET when payload already has contact_id.
+    // - Still do one call_id Redis GET to detect inbound mapping coming from legacy /api/inbound-mapping.
+    let mapping = await lookupMapping(call_id);
+    if (!mapping && !pickNonEmpty(body?.contact_id) && to) {
+        mapping = await lookupMappingByPhone(to);
+    }
+    const identity = resolveIdentityFromPayload(body, mapping);
+
+    const lead_id = identity.lead_id;
+    const contact_id = identity.contact_id;
+
+    // Direction-driven collection routing: provider tells us inbound/outbound directly via call.direction.
+    const isInboundByPayload = String(body?.direction || "").toLowerCase() === "inbound";
+    const isInboundByMapping = identity.collectionName === INBOUNDCALLLOG_COLLECTION;
+    const isInboundLog = isInboundByPayload || isInboundByMapping;
+    const collectionName = isInboundLog ? INBOUNDCALLLOG_COLLECTION : identity.collectionName;
+    const docKey = identity.normalizedCallId;
+
+    console.log("[Webhook][Event] received", {
+        event: event || null,
+        call_id: docKey || call_id || null,
+        contact_id: contact_id || null,
+        campaign_id: identity.campaign_id || null,
+        lead_id: lead_id || null,
+        to: to || null,
+        duration: duration ?? null,
+        callStatus: body?.callStatus || null,
+        answered: body?.answered ?? null,
+        direction: body?.direction || null,
+        source: mapping ? "redis+payload" : "payload-only",
+        isInbound: isInboundLog,
+    });
+
+    if (!contact_id && !hasLeadId(lead_id) && !isInboundLog) {
         await logMissingCallMapping({
             source: "event_webhook",
-            reason: "no_lead_id_after_redis_lookup",
+            reason: "no_identity_in_payload_or_mapping",
             event: event || null,
             call_id: call_id || null,
             to: to || null,
-            contact_id_from_mapping: contact_id,
+            contact_id_from_mapping: mapping?.contact_id || null,
             body_preview: previewPayload(body),
         });
     }
 
-    const docKey = normalizeCallId(call_id);
     if (isInboundLog) {
         if (docKey) {
             await appendCallEvent(docKey, event, body, null, {
@@ -322,7 +405,19 @@ async function handleEventWebhook(body) {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
         }
     } else {
-        await appendCallEvent(lead_id, event, body, null, { contact_id, collectionName });
+        // Outbound key precedence: explicit lead_id (legacy /api/call-mapping or payload),
+        // else fall back to normalized call_id so each call gets its own document.
+        const outboundKey = lead_id || docKey;
+        if (outboundKey) {
+            await appendCallEvent(outboundKey, event, body, null, {
+                contact_id,
+                campaign_id: identity.campaign_id,
+                callId: docKey,
+                collectionName,
+            });
+        } else {
+            logger.warn("[Webhook] Outbound event missing both lead_id and call_id — skipping append", { event });
+        }
     }
 
     switch (event) {
@@ -331,6 +426,7 @@ async function handleEventWebhook(body) {
             // Register the destination phone in the mapping so that
             // subsequent call_answered/call_hangup (which may have a different
             // Asterisk call_id) can still do a precise contact lookup by phone.
+            // Harmless no-op when mapping doesn't exist (new payload-first flow).
             if (event === "call_initiated") {
                 await enrichPhoneMapping(call_id, to);
             }
@@ -339,7 +435,7 @@ async function handleEventWebhook(body) {
 
             // Fire SSE anyway so UI call logs reload the ringing/initiated state
             callEvents.emit("call_update", {
-                campaign_id: mapping?.campaign_id || null,
+                campaign_id: identity.campaign_id || null,
                 call_id,
                 event,
                 timestamp: new Date().toISOString()
@@ -348,25 +444,46 @@ async function handleEventWebhook(body) {
 
         case "call_answered":
             await markCallAnswered(call_id, to);
-            await updateStatus(call_id, to, 2, event);
+            await updateStatus(call_id, to, 2, event, identity);
             break;
 
         case "call_hangup": {
             const dur = parseInt(duration, 10) || 0;
-            const answeredStageSeen =
-                (await hasAnsweredFlag(call_id, to)) ||
-                (await didCallReachAnsweredStage({
-                    leadId: lead_id,
-                    callId: call_id,
-                    collectionName,
-                    toPhone: to,
-                }));
-            const hangupStatus = answeredStageSeen ? 3 : 1;
+
+            // Provider-authoritative status when present (new provider sends callStatus + answered flag).
+            // Fall back to Redis answered-flag + event-history scan only when callStatus is absent.
+            let hangupStatus;
+            let statusSource;
+            if (body?.callStatus) {
+                const cs = String(body.callStatus).toUpperCase();
+                if (cs === "ANSWER" || cs === "ANSWERED") {
+                    hangupStatus = 3;
+                } else if (cs === "BUSY" || cs === "NO ANSWER" || cs === "NOANSWER" || cs === "FAILED") {
+                    hangupStatus = 1;
+                } else {
+                    hangupStatus = body?.answered ? 3 : 1;
+                }
+                statusSource = `callStatus=${body.callStatus}`;
+            } else {
+                const answeredStageSeen =
+                    body?.answered === true ||
+                    (await hasAnsweredFlag(call_id, to)) ||
+                    (await didCallReachAnsweredStage({
+                        leadId: lead_id || docKey,
+                        callId: call_id,
+                        collectionName,
+                        toPhone: to,
+                    }));
+                hangupStatus = answeredStageSeen ? 3 : 1;
+                statusSource = `answeredSeen=${answeredStageSeen ? "yes" : "no"}`;
+            }
+
             await updateStatus(
                 call_id,
                 to,
                 hangupStatus,
-                `${event} duration=${dur}s answeredSeen=${answeredStageSeen ? "yes" : "no"}`
+                `${event} duration=${dur}s ${statusSource}`,
+                identity
             );
             // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
             if (isInboundLog && docKey) {
@@ -381,7 +498,7 @@ async function handleEventWebhook(body) {
                 await markInboundConversationCompleted(docKey);
             }
             // Technical failure (network, provider error) — status=0
-            await updateStatus(call_id, to, 0, event);
+            await updateStatus(call_id, to, 0, event, identity);
             break;
         }
 
@@ -397,13 +514,38 @@ async function handleSummaryWebhook(body) {
 
     const dur = parseInt(Duration, 10) || 0;
 
-    // Look up mapping first (needed for answered-stage checks and collections)
-    const mapping = (await lookupMapping(Call_UniqueId)) || (await lookupMappingByPhone(To_number));
-    const lead_id = mapping?.lead_id || String(cdr_lead_id || "");
-    const contact_id = mapping?.contact_id || null;
-    const collectionName = mapping?.collectionName || null;
+    // Payload-first identity: CDR summary uses Call_UniqueId; allow payload-provided contact_id/campaign_id.
+    let mapping = await lookupMapping(Call_UniqueId);
+    if (!mapping && !pickNonEmpty(body?.contact_id) && To_number) {
+        mapping = await lookupMappingByPhone(To_number);
+    }
+    const identity = resolveIdentityFromPayload(
+        {
+            call_id: Call_UniqueId,
+            contact_id: body?.contact_id,
+            campaign_id: body?.campaign_id,
+            lead_id: cdr_lead_id,
+        },
+        mapping
+    );
+
+    const lead_id = identity.lead_id || "";
+    const contact_id = identity.contact_id || null;
+    const collectionName = identity.collectionName;
     const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
-    const cdrCallKey = normalizeCallId(Call_UniqueId);
+    const cdrCallKey = identity.normalizedCallId;
+
+    console.log("[Webhook][Summary] received", {
+        Call_UniqueId: cdrCallKey || Call_UniqueId || null,
+        CallStatus: CallStatus || null,
+        Duration: dur,
+        contact_id: contact_id || null,
+        campaign_id: identity.campaign_id || null,
+        lead_id: lead_id || null,
+        to: To_number || null,
+        source: mapping ? "redis+payload" : "payload-only",
+        isInbound: isInboundLog,
+    });
 
     /**
      * Status mapping for CDR summary:
@@ -417,7 +559,7 @@ async function handleSummaryWebhook(body) {
     const answeredEvidence =
         (await hasAnsweredFlag(Call_UniqueId, To_number)) ||
         (await didCallReachAnsweredStage({
-            leadId: lead_id,
+            leadId: lead_id || cdrCallKey,
             callId: Call_UniqueId,
             collectionName,
             toPhone: To_number,
@@ -438,13 +580,13 @@ async function handleSummaryWebhook(body) {
         newStatus = 0;
     }
 
-    if (!hasLeadId(lead_id) && !(isInboundLog && cdrCallKey)) {
+    if (!contact_id && !hasLeadId(lead_id) && !(isInboundLog && cdrCallKey)) {
         await logMissingCallMapping({
             source: "summary_webhook",
-            reason: "no_lead_id_mapping_or_cdr_body",
+            reason: "no_identity_in_payload_or_mapping",
             call_unique_id: Call_UniqueId || null,
             to_number: To_number || null,
-            contact_id_from_mapping: contact_id,
+            contact_id_from_mapping: mapping?.contact_id || null,
             body_preview: previewPayload(body),
         });
     }
@@ -458,14 +600,116 @@ async function handleSummaryWebhook(body) {
         await markInboundConversationCompleted(cdrCallKey);
         await notifyOndialInboundWebhook(cdrCallKey);
     } else {
-        await appendCallEvent(lead_id, "cdr_push", body, RecordingURL || null, { contact_id, collectionName });
+        // Outbound key precedence: lead_id (legacy/payload) else call_id (new payload-first flow).
+        const outboundKey = lead_id || cdrCallKey;
+        if (outboundKey) {
+            await appendCallEvent(outboundKey, "cdr_push", body, RecordingURL || null, {
+                contact_id,
+                campaign_id: identity.campaign_id,
+                callId: cdrCallKey,
+                collectionName,
+            });
+        } else {
+            logger.warn("[Webhook] Outbound summary missing both lead_id and Call_UniqueId — skipping append");
+        }
     }
 
     if (newStatus === 3) {
         await markCallAnswered(Call_UniqueId, To_number);
     }
 
-    await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`);
+    await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`, identity);
+}
+
+// ─── Provider Payload Normalizer ─────────────────────────────────────────────
+//
+// New telephony provider sends nested payloads with custom event names:
+//   {
+//     event: "call.initiated" | "call.ringing" | "call.answered" | "call.completed" | "call.failed",
+//     call: {
+//       id, direction, from, to, status, callStatus, hangupCause,
+//       startedAt, ringingAt, answeredAt, endedAt,
+//       ringDurationSec, durationSec,
+//       customParameters: { contact_id, campaign_id, call_unique_id, lead_id? }
+//     },
+//     legs: [...]
+//   }
+//
+// We convert it once at the router boundary to the legacy flat shape:
+//   { event: "call_initiated"|..., call_id, to, from, duration, contact_id,
+//     campaign_id, call_unique_id, lead_id, callStatus, answered, direction,
+//     recordingUrl, _raw }
+//
+// Legacy payloads (already flat) pass through untouched.
+const NEW_EVENT_MAP = {
+    "call.initiated": "call_initiated",
+    "call.ringing": "call_ringing",
+    "call.answered": "call_answered",
+    "call.completed": "call_hangup",
+    "call.failed": "call_failed",
+};
+
+function isNewProviderShape(body) {
+    return (
+        body &&
+        typeof body === "object" &&
+        typeof body.event === "string" &&
+        body.event.includes(".") &&
+        body.call &&
+        typeof body.call === "object"
+    );
+}
+
+function deriveDurationSec(call) {
+    if (call.durationSec != null && !Number.isNaN(Number(call.durationSec))) {
+        return Number(call.durationSec);
+    }
+    if (call.answeredAt && call.endedAt) {
+        const ms = new Date(call.endedAt).getTime() - new Date(call.answeredAt).getTime();
+        if (Number.isFinite(ms) && ms >= 0) return Math.floor(ms / 1000);
+    }
+    return null;
+}
+
+function normalizeWebhookPayload(body) {
+    if (!isNewProviderShape(body)) return body;
+
+    const c = body.call || {};
+    const cp = c.customParameters && typeof c.customParameters === "object" ? c.customParameters : {};
+
+    console.log("[Webhook] customParameters received", {
+        event: body.event,
+        call_id: c.id || null,
+        direction: c.direction || null,
+        customParameters: cp,
+        extracted: {
+            contact_id: cp.contact_id ?? null,
+            campaign_id: cp.campaign_id ?? null,
+            call_unique_id: cp.call_unique_id ?? null,
+            lead_id: cp.lead_id ?? null,
+        },
+    });
+
+    const normEvent = NEW_EVENT_MAP[body.event] || body.event;
+    const durationSec = deriveDurationSec(c);
+    const callId = cp.call_unique_id || c.id || null;
+
+    return {
+        event: normEvent,
+        call_id: callId,
+        to: c.to || null,
+        from: c.from || null,
+        duration: durationSec,
+        contact_id: cp.contact_id ?? null,
+        campaign_id: cp.campaign_id ?? null,
+        call_unique_id: cp.call_unique_id ?? c.id ?? null,
+        lead_id: cp.lead_id ?? null,
+        callStatus: c.callStatus || null,
+        answered: c.answeredAt != null,
+        direction: c.direction || null,
+        recordingUrl: c.recordingUrl || c.recordingURL || c.recording_url || null,
+        _raw: body,
+    };
 }
 
 // ─── Main Router ──────────────────────────────────────────────────────────────
@@ -497,10 +741,21 @@ async function handleWebhook(body, meta = {}) {
         return;
     }
     try {
-        if (body.event) {
-            await handleEventWebhook(body);
-        } else if (body.Call_UniqueId) {
-            await handleSummaryWebhook(body);
+        const wasNewShape = isNewProviderShape(body);
+        const normalized = wasNewShape ? normalizeWebhookPayload(body) : body;
+        const payloadShape = normalized.event ? "event" : normalized.Call_UniqueId ? "summary" : "unknown";
+
+        console.log("[Webhook] received payload", {
+            shape: payloadShape,
+            providerShape: wasNewShape ? "new" : "legacy",
+            normalizedEvent: normalized.event || null,
+            body,
+        });
+
+        if (normalized.event) {
+            await handleEventWebhook(normalized);
+        } else if (normalized.Call_UniqueId) {
+            await handleSummaryWebhook(normalized);
         } else {
             logger.warn("[Webhook] Unknown payload shape, skipping");
         }
