@@ -107,21 +107,14 @@ async function reconcileDialerCallLogToUniqueId(db, collectionName, ctx) {
     }
 }
 
-function resolveCollection({ contact_id }) {
-    if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
-        return TESTCALL_COLLECTION;
-    }
+function resolveCollection() {
     return CALLLOGS_COLLECTION;
 }
 
 /**
- * Outbound telephony (campaign + wizard test) uses CallLogs + campaignCreditDeduction.
- * TestCall is UI/history only — synced via syncTestCallMirror after billing.
+ * All outbound webhook events → CallLogs (billing path). TestCall is mirrored after credit.
  */
-async function resolveOutboundCollection({ contact_id }) {
-    if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
-        return TESTCALL_COLLECTION;
-    }
+async function resolveOutboundCollection() {
     return CALLLOGS_COLLECTION;
 }
 

@@ -214,7 +214,7 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         return;
     }
 
-    const collectionName = await resolveOutboundCollection({ contact_id: contactId });
+    const collectionName = await resolveOutboundCollection();
 
     await registerCallMapping({
         call_id: callKey,

@@ -15,6 +15,7 @@ const {
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
+const { isDirectPhoneContactId } = require("./lib/directContactId");
 const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
 const { finalizeOutboundCallLog } = require("./lib/finalizeOutboundCallLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
@@ -116,10 +117,10 @@ async function updateByContactId(contactId, newStatus, context = "") {
         return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
     }
 
-    if (cid.startsWith("direct_")) {
+    if (isDirectPhoneContactId(cid)) {
         const digits = cid.slice("direct_".length).replace(/\D/g, "");
         if (digits) {
-            return await updateByMobile(digits, newStatus, `${context} [direct_contact_id]`);
+            return await updateByMobile(digits, newStatus, `${context} [direct_phone_contact_id]`);
         }
     }
 
@@ -201,9 +202,7 @@ function looksLikeCallUniqueId(id) {
 async function enrichIdentityFromCallLog(identity) {
     const merged = await resolveStoredOutboundIdentity(identity);
     if (!merged.campaign_id && !merged.contact_id) return identity;
-    const collectionName = await resolveOutboundCollection({
-        contact_id: merged.contact_id || identity.contact_id,
-    });
+    const collectionName = await resolveOutboundCollection();
     return { ...merged, collectionName };
 }
 
@@ -214,7 +213,7 @@ async function resolveIdentityCollection(identity, body) {
     if (String(body?.direction || "").toLowerCase() === "inbound") {
         return INBOUNDCALLLOG_COLLECTION;
     }
-    return resolveOutboundCollection({ contact_id: identity?.contact_id });
+    return resolveOutboundCollection();
 }
 
 /**
@@ -309,8 +308,7 @@ async function persistCallMappingFromIdentity(identity, phone) {
     const mapCallId = identity?.normalizedCallId || normalizeCallId(identity?.callId);
     const contact_id = identity?.contact_id;
     if (!mapCallId || !contact_id) return;
-    const collectionName =
-        identity.collectionName || (await resolveOutboundCollection({ contact_id }));
+    const collectionName = identity.collectionName || (await resolveOutboundCollection());
     await registerCallMapping({
         call_id: mapCallId,
         lead_id: identity.lead_id || mapCallId,
@@ -530,7 +528,13 @@ async function handleEventWebhook(body) {
         mapping = await lookupMappingByPhone(to);
     }
     let identity = resolveIdentityFromPayload(body, mapping);
-    identity = await resolveStoredOutboundIdentity(identity, { toPhone: to });
+    identity = await resolveStoredOutboundIdentity(
+        {
+            ...identity,
+            providerCallId: pickNonEmpty(body?.provider_call_id, identity?.providerCallId),
+        },
+        { toPhone: to }
+    );
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
