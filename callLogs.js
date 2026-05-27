@@ -10,6 +10,103 @@ const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "Inbo
 const INBOUND_CONVERSATION_STATUS_ACTIVE = "active";
 const INBOUND_CONVERSATION_STATUS_COMPLETED = "completed";
 
+const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuidCallKey(value) {
+    return typeof value === "string" && UUID_RE.test(value.trim());
+}
+
+function resolveOutboundLeadId(leadId, options = {}) {
+    const fromOptions = pickNonEmpty(options.callUniqueId, options.callId);
+    if (isUuidCallKey(fromOptions)) return String(fromOptions).trim();
+    if (isUuidCallKey(leadId)) return String(leadId).trim();
+    return leadId != null && String(leadId).trim() !== "" ? String(leadId).trim() : null;
+}
+
+function pickNonEmpty(...values) {
+    for (const v of values) {
+        if (v != null && String(v).trim() !== "") return String(v).trim();
+    }
+    return null;
+}
+
+/**
+ * Dialer/voice-AI often creates CallLogs with API lead_id + provider call_id before webhooks.
+ * Re-key that row to call_unique_id, or fold it into the webhook doc when both exist.
+ */
+async function reconcileDialerCallLogToUniqueId(db, collectionName, ctx) {
+    const { contact_id, campaign_id, callUniqueId, providerCallId } = ctx;
+    if (!contact_id || !callUniqueId || !providerCallId) return;
+
+    const providerRaw = String(providerCallId).trim();
+    const providerNorm = normalizeCallId(providerRaw) || providerRaw;
+    const providerHex = providerNorm.replace(/-/g, "");
+
+    const legacyQuery = {
+        contact_id: String(contact_id),
+        lead_id: { $ne: callUniqueId },
+        $or: [{ call_id: providerRaw }, { call_id: providerNorm }, { call_id: providerHex }],
+    };
+    if (campaign_id) legacyQuery.campaign_id = String(campaign_id);
+
+    const legacy = await db
+        .collection(collectionName)
+        .findOne(legacyQuery, { sort: { createdAt: -1 } });
+    if (!legacy) return;
+
+    const canonical = await db.collection(collectionName).findOne({ lead_id: callUniqueId });
+
+    if (canonical && String(canonical._id) !== String(legacy._id)) {
+        const mergeSet = {
+            provider_call_id: providerNorm,
+            updatedAt: new Date(),
+        };
+        if (legacy.conversation && !canonical.conversation) {
+            mergeSet.conversation = legacy.conversation;
+        }
+        if (legacy.recordingUrl && !canonical.recordingUrl) {
+            mergeSet.recordingUrl = legacy.recordingUrl;
+        }
+        const legacyEvents = Array.isArray(legacy.call_data?.events) ? legacy.call_data.events : [];
+        await db.collection(collectionName).updateOne({ _id: canonical._id }, { $set: mergeSet });
+        if (legacyEvents.length > 0) {
+            await db.collection(collectionName).updateOne(
+                { _id: canonical._id },
+                { $push: { "call_data.events": { $each: legacyEvents } } }
+            );
+        }
+        await db.collection(collectionName).deleteOne({ _id: legacy._id });
+        logger.info("[CallLog] Merged legacy dialer CallLog into call_unique_id doc", {
+            callUniqueId,
+            legacyLeadId: legacy.lead_id,
+            legacyCallId: legacy.call_id,
+        });
+        return;
+    }
+
+    if (!canonical) {
+        await db.collection(collectionName).updateOne(
+            { _id: legacy._id },
+            {
+                $set: {
+                    lead_id: callUniqueId,
+                    call_id: callUniqueId,
+                    call_unique_id: callUniqueId,
+                    provider_call_id: providerNorm,
+                    legacy_lead_id: legacy.lead_id,
+                    legacy_call_id: legacy.call_id,
+                    updatedAt: new Date(),
+                },
+            }
+        );
+        logger.info("[CallLog] Re-keyed legacy dialer CallLog to call_unique_id", {
+            callUniqueId,
+            legacyLeadId: legacy.lead_id,
+        });
+    }
+}
+
 function resolveCollection({ contact_id }) {
     if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
         return TESTCALL_COLLECTION;
@@ -275,9 +372,26 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
         docFilter = { call_id: cid };
         logLabel = `call_id=${cid}`;
     } else {
-        if (!lead_id) return;
-        docFilter = { lead_id: String(lead_id) };
-        logLabel = `lead_id=${lead_id}`;
+        const effectiveLeadId = resolveOutboundLeadId(lead_id, options);
+        if (!effectiveLeadId) return;
+
+        try {
+            const db = getDb();
+            await reconcileDialerCallLogToUniqueId(db, resolvedCollectionName, {
+                contact_id: options.contact_id,
+                campaign_id: options.campaign_id,
+                callUniqueId: effectiveLeadId,
+                providerCallId: options.providerCallId,
+            });
+        } catch (reconcileErr) {
+            logger.warn("[CallLog] reconcileDialerCallLogToUniqueId failed", {
+                error: reconcileErr.message,
+                lead_id: effectiveLeadId,
+            });
+        }
+
+        docFilter = { lead_id: effectiveLeadId };
+        logLabel = `lead_id=${effectiveLeadId}`;
     }
 
     try {
@@ -309,8 +423,9 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
                 identitySet.config_id = { $ifNull: ["$config_id", String(options.campaign_id)] };
             }
         } else {
-            // lead_id IS the filter key — must always be present.
-            identitySet.lead_id = String(lead_id);
+            const outboundLeadId = docFilter.lead_id;
+            identitySet.lead_id = outboundLeadId;
+            identitySet.call_unique_id = { $ifNull: ["$call_unique_id", outboundLeadId] };
             if (options.contact_id) {
                 identitySet.contact_id = { $ifNull: ["$contact_id", String(options.contact_id)] };
             }
@@ -319,6 +434,11 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             }
             if (options.callId) {
                 identitySet.call_id = { $ifNull: ["$call_id", String(options.callId)] };
+            }
+            if (options.providerCallId) {
+                identitySet.provider_call_id = {
+                    $ifNull: ["$provider_call_id", String(options.providerCallId)],
+                };
             }
         }
 
@@ -363,4 +483,5 @@ module.exports = {
     mergeTwilioStatusIntoCallLog,
     upsertTwilioAnchoredCallLog,
     TWILIO_STATUS_EVENT,
+    isUuidCallKey,
 };

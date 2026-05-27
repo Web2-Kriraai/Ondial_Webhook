@@ -20,6 +20,7 @@ const {
     INBOUNDCALLLOG_COLLECTION,
     markInboundConversationCompleted,
     resolveCollection,
+    isUuidCallKey,
 } = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
@@ -531,14 +532,16 @@ async function handleEventWebhook(body) {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
         }
     } else {
-        // Outbound key precedence: explicit lead_id (legacy /api/call-mapping or payload),
-        // else fall back to normalized call_id so each call gets its own document.
-        const outboundKey = lead_id || docKey;
+        // Outbound: one doc per dial — always key by call_unique_id, not API numeric lead_id.
+        const outboundKey =
+            identity.call_unique_id || docKey || (isUuidCallKey(lead_id) ? lead_id : null) || lead_id;
         if (outboundKey) {
             await appendCallEvent(outboundKey, event, body, null, {
                 contact_id,
                 campaign_id: identity.campaign_id,
                 callId: docKey,
+                callUniqueId: identity.call_unique_id || docKey,
+                providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
             });
         } else {
@@ -763,13 +766,15 @@ async function handleSummaryWebhook(body) {
         await markInboundConversationCompleted(cdrCallKey);
         await notifyOndialInboundWebhook(cdrCallKey);
     } else {
-        // Outbound key precedence: lead_id (legacy/payload) else call_id (new payload-first flow).
-        const outboundKey = lead_id || cdrCallKey;
+        const outboundKey =
+            identity.call_unique_id || cdrCallKey || (isUuidCallKey(lead_id) ? lead_id : null) || lead_id;
         if (outboundKey) {
             await appendCallEvent(outboundKey, "cdr_push", body, RecordingURL || null, {
                 contact_id,
                 campaign_id: identity.campaign_id,
                 callId: cdrCallKey,
+                callUniqueId: identity.call_unique_id || cdrCallKey,
+                providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
             });
         } else {
