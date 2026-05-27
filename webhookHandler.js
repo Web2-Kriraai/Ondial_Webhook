@@ -6,11 +6,13 @@ const {
     lookupMapping,
     lookupMappingByPhone,
     enrichPhoneMapping,
+    registerCallMapping,
     normalizeCallId,
     normalizePhone,
     markCallAnswered,
     hasAnsweredFlag,
 } = require("./callMapping");
+const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
 const {
     appendCallEvent,
     INBOUNDCALLLOG_COLLECTION,
@@ -175,14 +177,32 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
     }
 }
 
-/** Returns the first non-empty trimmed string from the arguments, else null. */
-function pickNonEmpty(...values) {
-    for (const v of values) {
-        if (v == null) continue;
-        const s = String(v).trim();
-        if (s !== "") return s;
+/**
+ * Campaign id is not always echoed in telephony customParameters — load from contact row.
+ */
+async function resolveCampaignIdFromContact(contactId) {
+    if (!isMongoObjectIdString(contactId)) return null;
+    try {
+        const db = getDb();
+        const doc = await db.collection("contactprocessings").findOne(
+            { _id: new ObjectId(String(contactId)) },
+            { projection: { campaign_id: 1, config_id: 1 } }
+        );
+        return pickNonEmpty(doc?.campaign_id, doc?.config_id);
+    } catch (err) {
+        logger.warn("[Webhook] resolveCampaignIdFromContact failed", {
+            contactId: String(contactId),
+            error: err.message,
+        });
+        return null;
     }
-    return null;
+}
+
+async function enrichIdentityFromContact(identity) {
+    if (!identity?.contact_id || identity.campaign_id) return identity;
+    const campaign_id = await resolveCampaignIdFromContact(identity.contact_id);
+    if (!campaign_id) return identity;
+    return { ...identity, campaign_id };
 }
 
 /**
@@ -195,13 +215,20 @@ function pickNonEmpty(...values) {
  *   - inbound flag (collectionName === InboundConversation) keeps coming from /api/inbound-mapping.
  */
 function resolveIdentityFromPayload(body, mapping) {
-    const rawCallId = body?.call_id ?? body?.Call_UniqueId ?? body?.call_unique_id;
+    const rawCallId =
+        body?.call_unique_id ?? body?.call_id ?? body?.Call_UniqueId ?? mapping?.call_id;
+    const callUniqueId = pickNonEmpty(body?.call_unique_id, rawCallId);
+    const contactId = pickNonEmpty(body?.contact_id, mapping?.contact_id);
+    const leadId = pickNonEmpty(body?.lead_id, callUniqueId, mapping?.lead_id);
+
     return {
-        callId: rawCallId,
-        normalizedCallId: normalizeCallId(rawCallId),
-        contact_id: pickNonEmpty(body?.contact_id, mapping?.contact_id),
+        callId: callUniqueId || rawCallId,
+        normalizedCallId: normalizeCallId(callUniqueId || rawCallId),
+        providerCallId: pickNonEmpty(body?.provider_call_id, mapping?.provider_call_id),
+        contact_id: contactId,
         campaign_id: pickNonEmpty(body?.campaign_id, mapping?.campaign_id),
-        lead_id: pickNonEmpty(body?.lead_id, mapping?.lead_id),
+        lead_id: leadId,
+        call_unique_id: callUniqueId,
         collectionName: mapping?.collectionName || null,
     };
 }
@@ -355,7 +382,10 @@ async function handleEventWebhook(body) {
     if (!mapping && !pickNonEmpty(body?.contact_id) && to) {
         mapping = await lookupMappingByPhone(to);
     }
-    const identity = resolveIdentityFromPayload(body, mapping);
+    let identity = resolveIdentityFromPayload(body, mapping);
+    if (!identity.campaign_id && identity.contact_id) {
+        identity = await enrichIdentityFromContact(identity);
+    }
 
     const lead_id = identity.lead_id;
     const contact_id = identity.contact_id;
@@ -428,6 +458,16 @@ async function handleEventWebhook(body) {
             // Asterisk call_id) can still do a precise contact lookup by phone.
             // Harmless no-op when mapping doesn't exist (new payload-first flow).
             if (event === "call_initiated") {
+                const mapCallId = identity.normalizedCallId || normalizeCallId(call_id);
+                if (mapCallId && contact_id) {
+                    await registerCallMapping({
+                        call_id: mapCallId,
+                        lead_id: identity.lead_id || mapCallId,
+                        campaign_id: identity.campaign_id || "",
+                        contact_id,
+                        phone: to,
+                    });
+                }
                 await enrichPhoneMapping(call_id, to);
             }
             // Do NOT update DB — worker already sets status=1 when call is placed.
@@ -502,6 +542,13 @@ async function handleEventWebhook(body) {
             break;
         }
 
+        case "call_ended":
+            // Provider fires `call.ended` before `call.completed`; events already appended above.
+            logger.info(
+                `[Webhook] call_ended recorded for call_id=${call_id} — status/credit handled on call_hangup`
+            );
+            break;
+
         default:
             logger.info(`[Webhook] Unhandled event: ${event}`);
     }
@@ -519,15 +566,19 @@ async function handleSummaryWebhook(body) {
     if (!mapping && !pickNonEmpty(body?.contact_id) && To_number) {
         mapping = await lookupMappingByPhone(To_number);
     }
-    const identity = resolveIdentityFromPayload(
+    let identity = resolveIdentityFromPayload(
         {
             call_id: Call_UniqueId,
+            call_unique_id: body?.call_unique_id || Call_UniqueId,
             contact_id: body?.contact_id,
             campaign_id: body?.campaign_id,
             lead_id: cdr_lead_id,
         },
         mapping
     );
+    if (!identity.campaign_id && identity.contact_id) {
+        identity = await enrichIdentityFromContact(identity);
+    }
 
     const lead_id = identity.lead_id || "";
     const contact_id = identity.contact_id || null;
@@ -645,6 +696,7 @@ const NEW_EVENT_MAP = {
     "call.initiated": "call_initiated",
     "call.ringing": "call_ringing",
     "call.answered": "call_answered",
+    "call.ended": "call_ended",
     "call.completed": "call_hangup",
     "call.failed": "call_failed",
 };
@@ -675,35 +727,40 @@ function normalizeWebhookPayload(body) {
     if (!isNewProviderShape(body)) return body;
 
     const c = body.call || {};
-    const cp = c.customParameters && typeof c.customParameters === "object" ? c.customParameters : {};
+    const cp = extractCustomParameters(c, body);
+
+    const callUniqueId = cp.call_unique_id;
+    const providerCallId = c.id || null;
+    const canonicalCallId = callUniqueId || providerCallId;
 
     console.log("[Webhook] customParameters received", {
         event: body.event,
-        call_id: c.id || null,
+        provider_call_id: providerCallId,
+        call_unique_id: callUniqueId,
         direction: c.direction || null,
-        customParameters: cp,
+        customParameters: cp.raw,
         extracted: {
-            contact_id: cp.contact_id ?? null,
-            campaign_id: cp.campaign_id ?? null,
-            call_unique_id: cp.call_unique_id ?? null,
-            lead_id: cp.lead_id ?? null,
+            contact_id: cp.contact_id,
+            campaign_id: cp.campaign_id,
+            call_unique_id: callUniqueId,
+            lead_id: pickNonEmpty(cp.lead_id, callUniqueId),
         },
     });
 
     const normEvent = NEW_EVENT_MAP[body.event] || body.event;
     const durationSec = deriveDurationSec(c);
-    const callId = cp.call_unique_id || c.id || null;
 
     return {
         event: normEvent,
-        call_id: callId,
+        call_id: canonicalCallId,
         to: c.to || null,
         from: c.from || null,
         duration: durationSec,
-        contact_id: cp.contact_id ?? null,
-        campaign_id: cp.campaign_id ?? null,
-        call_unique_id: cp.call_unique_id ?? c.id ?? null,
-        lead_id: cp.lead_id ?? null,
+        contact_id: cp.contact_id,
+        campaign_id: cp.campaign_id,
+        call_unique_id: callUniqueId,
+        lead_id: pickNonEmpty(cp.lead_id, callUniqueId),
+        provider_call_id: providerCallId,
         callStatus: c.callStatus || null,
         answered: c.answeredAt != null,
         direction: c.direction || null,
