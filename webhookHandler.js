@@ -15,13 +15,19 @@ const {
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
+const { finalizeOutboundCallLog } = require("./lib/finalizeOutboundCallLog");
+const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
+const { syncTestCallMirror } = require("./lib/syncTestCallMirror");
 const {
     appendCallEvent,
     INBOUNDCALLLOG_COLLECTION,
+    TESTCALL_COLLECTION,
     markInboundConversationCompleted,
-    resolveCollection,
+    resolveOutboundCollection,
     isUuidCallKey,
 } = require("./callLogs");
+
+const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
 const callEvents = require("./events");
@@ -202,13 +208,14 @@ async function enrichIdentityFromCallLog(identity) {
 
     try {
         const db = getDb();
-        const collectionName = resolveCollection({ contact_id: identity?.contact_id });
-        const doc = await db.collection(collectionName).findOne(
-            {
-                $or: [{ lead_id: String(key) }, { call_id: String(key) }],
-            },
-            { projection: { contact_id: 1, campaign_id: 1, "call_data.events": 1 } }
-        );
+        const keyFilter = { $or: [{ lead_id: String(key) }, { call_id: String(key) }] };
+        const projection = { contact_id: 1, campaign_id: 1, "call_data.events": 1 };
+
+        let doc = await db.collection(CALLLOGS_COLLECTION).findOne(keyFilter, { projection });
+        if (!doc) {
+            doc = await db.collection(TESTCALL_COLLECTION).findOne(keyFilter, { projection });
+        }
+
         if (!doc) return identity;
 
         let contact_id = pickNonEmpty(identity.contact_id, doc.contact_id);
@@ -244,10 +251,15 @@ async function enrichIdentityFromCallLog(identity) {
             campaign_id: campaign_id || null,
         });
 
+        const collectionName = await resolveOutboundCollection({
+            contact_id: contact_id || identity.contact_id,
+        });
+
         return {
             ...identity,
             contact_id: contact_id || identity.contact_id,
             campaign_id: campaign_id || identity.campaign_id,
+            collectionName,
         };
     } catch (err) {
         logger.warn("[Webhook] enrichIdentityFromCallLog failed", { error: err.message, key });
@@ -255,16 +267,103 @@ async function enrichIdentityFromCallLog(identity) {
     }
 }
 
+async function resolveIdentityCollection(identity, body) {
+    if (identity?.collectionName === INBOUNDCALLLOG_COLLECTION) {
+        return INBOUNDCALLLOG_COLLECTION;
+    }
+    if (String(body?.direction || "").toLowerCase() === "inbound") {
+        return INBOUNDCALLLOG_COLLECTION;
+    }
+    return resolveOutboundCollection({ contact_id: identity?.contact_id });
+}
+
+/**
+ * Campaign + wizard test outbound: CallLogs + campaignCreditDeduction; mirror TestCall for UI.
+ */
+async function processOutboundHangupBilling({
+    identity,
+    contact_id,
+    lead_id,
+    callUniqueForFinalize,
+    durationSec,
+    recordingUrl,
+    callStatus,
+}) {
+    let campaignIdForCredit = identity.campaign_id;
+    if (!campaignIdForCredit && contact_id) {
+        campaignIdForCredit = await resolveCampaignIdFromContact(contact_id);
+    }
+    if (!campaignIdForCredit) {
+        logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
+            call_id: callUniqueForFinalize,
+            contact_id,
+        });
+        return;
+    }
+
+    const creditResult = await tryDeductCampaignCallCredits({
+        callUniqueId: callUniqueForFinalize,
+        contactId: contact_id,
+        campaignId: campaignIdForCredit,
+        durationSec,
+    });
+    logger.info("[Webhook] Outbound credit deduction", {
+        call_id: callUniqueForFinalize,
+        campaign_id: campaignIdForCredit,
+        ...creditResult,
+    });
+
+    if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
+        await finalizeOutboundCallLog({
+            callUniqueId: callUniqueForFinalize,
+            durationSec,
+            recordingUrl,
+            callStatus,
+        });
+        const mirror = { status: "completed", creditsDeducted: true };
+        if (durationSec > 0) {
+            mirror.duration = durationSec;
+            mirror.duration_ms = durationSec * 1000;
+        }
+        if (recordingUrl) mirror.recordingUrl = String(recordingUrl).trim();
+        if (creditResult.cost != null) mirror.creditsDeductedAmount = creditResult.cost;
+        await syncTestCallMirror({
+            callId: callUniqueForFinalize,
+            leadId: lead_id,
+            set: mirror,
+        });
+        triggerCallAnalysis(callUniqueForFinalize).catch((err) => {
+            logger.warn("[Webhook] Analysis trigger failed", {
+                call_id: callUniqueForFinalize,
+                error: err.message,
+            });
+        });
+    } else if (creditResult.outcome !== "disabled") {
+        await syncTestCallMirror({
+            callId: callUniqueForFinalize,
+            leadId: lead_id,
+            set: {
+                status: "completed",
+                creditsDeducted: false,
+                creditDeductionError: creditResult.error || creditResult.outcome,
+            },
+        });
+    }
+}
+
 async function persistCallMappingFromIdentity(identity, phone) {
     const mapCallId = identity?.normalizedCallId || normalizeCallId(identity?.callId);
     const contact_id = identity?.contact_id;
     if (!mapCallId || !contact_id) return;
+    const collectionName =
+        identity.collectionName || (await resolveOutboundCollection({ contact_id }));
     await registerCallMapping({
         call_id: mapCallId,
         lead_id: identity.lead_id || mapCallId,
         campaign_id: identity.campaign_id || "",
         contact_id,
         phone: phone || "",
+        collectionName,
     });
 }
 
@@ -478,6 +577,8 @@ async function handleEventWebhook(body) {
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
+    const collectionName = await resolveIdentityCollection(identity, body);
+    identity = { ...identity, collectionName };
     await persistCallMappingFromIdentity(identity, to);
 
     const lead_id = identity.lead_id;
@@ -487,7 +588,6 @@ async function handleEventWebhook(body) {
     const isInboundByPayload = String(body?.direction || "").toLowerCase() === "inbound";
     const isInboundByMapping = identity.collectionName === INBOUNDCALLLOG_COLLECTION;
     const isInboundLog = isInboundByPayload || isInboundByMapping;
-    const collectionName = isInboundLog ? INBOUNDCALLLOG_COLLECTION : identity.collectionName;
     const docKey = identity.normalizedCallId;
 
     console.log("[Webhook][Event] received", {
@@ -535,8 +635,16 @@ async function handleEventWebhook(body) {
         // Outbound: one doc per dial — always key by call_unique_id, not API numeric lead_id.
         const outboundKey =
             identity.call_unique_id || docKey || (isUuidCallKey(lead_id) ? lead_id : null) || lead_id;
+        const eventRecordingUrl =
+            event === "call_hangup"
+                ? pickNonEmpty(
+                      body?.recordingUrl,
+                      body?._raw?.call?.recordingUrl,
+                      body?._raw?.call?.recordingURL
+                  )
+                : null;
         if (outboundKey) {
-            await appendCallEvent(outboundKey, event, body, null, {
+            await appendCallEvent(outboundKey, event, body, eventRecordingUrl, {
                 contact_id,
                 campaign_id: identity.campaign_id,
                 callId: docKey,
@@ -616,28 +724,21 @@ async function handleEventWebhook(body) {
             );
 
             if (!isInboundLog && hangupStatus === 3 && dur > 0) {
-                let campaignIdForCredit = identity.campaign_id;
-                if (!campaignIdForCredit && contact_id) {
-                    campaignIdForCredit = await resolveCampaignIdFromContact(contact_id);
-                }
-                if (campaignIdForCredit) {
-                    const creditResult = await tryDeductCampaignCallCredits({
-                        callUniqueId: identity.normalizedCallId || call_id,
-                        contactId: contact_id,
-                        campaignId: campaignIdForCredit,
-                        durationSec: dur,
-                    });
-                    logger.info("[Webhook] Campaign credit deduction", {
-                        call_id: identity.normalizedCallId || call_id,
-                        campaign_id: campaignIdForCredit,
-                        ...creditResult,
-                    });
-                } else {
-                    logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
-                        call_id: identity.normalizedCallId || call_id,
-                        contact_id,
-                    });
-                }
+                const callUniqueForFinalize = identity.normalizedCallId || call_id;
+                const recordingUrl = pickNonEmpty(
+                    body?.recordingUrl,
+                    body?._raw?.call?.recordingUrl,
+                    body?._raw?.call?.recordingURL
+                );
+                await processOutboundHangupBilling({
+                    identity,
+                    contact_id,
+                    lead_id,
+                    callUniqueForFinalize,
+                    durationSec: dur,
+                    recordingUrl,
+                    callStatus: body?.callStatus,
+                });
             }
 
             // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
@@ -691,13 +792,16 @@ async function handleSummaryWebhook(body) {
         },
         mapping
     );
+    identity = await enrichIdentityFromCallLog(identity);
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
 
+    const collectionName = await resolveIdentityCollection(identity, body);
+    identity = { ...identity, collectionName };
+
     const lead_id = identity.lead_id || "";
     const contact_id = identity.contact_id || null;
-    const collectionName = identity.collectionName;
     const isInboundLog = collectionName === INBOUNDCALLLOG_COLLECTION;
     const cdrCallKey = identity.normalizedCallId;
 
@@ -787,6 +891,19 @@ async function handleSummaryWebhook(body) {
     }
 
     await updateStatus(Call_UniqueId, To_number, newStatus, `summary Duration=${dur}s`, identity);
+
+    if (!isInboundLog && newStatus === 3 && dur > 0) {
+        const cdrKey = identity.call_unique_id || cdrCallKey || lead_id;
+        await processOutboundHangupBilling({
+            identity,
+            contact_id,
+            lead_id,
+            callUniqueForFinalize: cdrKey,
+            durationSec: dur,
+            recordingUrl: RecordingURL || null,
+            callStatus: CallStatus,
+        });
+    }
 }
 
 // ─── Provider Payload Normalizer ─────────────────────────────────────────────

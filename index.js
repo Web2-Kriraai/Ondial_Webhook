@@ -16,6 +16,7 @@ const {
     createCallLog,
     INBOUNDCALLLOG_COLLECTION,
     resolveCollection,
+    resolveOutboundCollection,
     buildTwilioStatusEvent,
     mergeTwilioStatusIntoCallLog,
     upsertTwilioAnchoredCallLog,
@@ -213,18 +214,22 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         return;
     }
 
+    const collectionName = await resolveOutboundCollection({ contact_id: contactId });
+
     await registerCallMapping({
         call_id: callKey,
         lead_id: body.lead_id != null ? String(body.lead_id) : callKey,
         campaign_id: campaignId,
         contact_id: contactId,
         phone: phone || "",
+        collectionName,
     });
 
     logger.info("[OutboundMapping] Stored Redis mapping", {
         call_id: callKey,
         contact_id: contactId,
         campaign_id: campaignId || null,
+        collection: collectionName,
     });
 });
 

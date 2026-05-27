@@ -114,6 +114,17 @@ function resolveCollection({ contact_id }) {
     return CALLLOGS_COLLECTION;
 }
 
+/**
+ * Outbound telephony (campaign + wizard test) uses CallLogs + campaignCreditDeduction.
+ * TestCall is UI/history only — synced via syncTestCallMirror after billing.
+ */
+async function resolveOutboundCollection({ contact_id }) {
+    if (typeof contact_id === "string" && contact_id.startsWith("direct_")) {
+        return TESTCALL_COLLECTION;
+    }
+    return CALLLOGS_COLLECTION;
+}
+
 const TWILIO_STATUS_EVENT = "twilio_call_status";
 
 function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIso }) {
@@ -478,7 +489,9 @@ module.exports = {
     markInboundConversationActive,
     markInboundConversationCompleted,
     INBOUNDCALLLOG_COLLECTION,
+    TESTCALL_COLLECTION,
     resolveCollection,
+    resolveOutboundCollection,
     buildTwilioStatusEvent,
     mergeTwilioStatusIntoCallLog,
     upsertTwilioAnchoredCallLog,
