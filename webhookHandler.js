@@ -13,6 +13,8 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
+const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
+const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
 const {
     appendCallEvent,
     INBOUNDCALLLOG_COLLECTION,
@@ -38,10 +40,6 @@ const PROCESSING_TTL_MS = Number(process.env.PROCESSING_WEBHOOK_TTL_MS || 5 * 60
 const REPLAY_NONCE_TTL_SEC = Number(process.env.WEBHOOK_REPLAY_NONCE_TTL_SEC || 3600);
 
 // ─── DB Update Helpers ────────────────────────────────────────────────────────
-
-function isMongoObjectIdString(s) {
-    return typeof s === "string" && /^[a-fA-F0-9]{24}$/.test(s);
-}
 
 /**
  * Test / direct-dial flows use synthetic ids like "direct_9408645627" — not valid ObjectIds.
@@ -178,27 +176,6 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
     }
 }
 
-/**
- * Campaign id is not always echoed in telephony customParameters — load from contact row.
- */
-async function resolveCampaignIdFromContact(contactId) {
-    if (!isMongoObjectIdString(contactId)) return null;
-    try {
-        const db = getDb();
-        const doc = await db.collection("contactprocessings").findOne(
-            { _id: new ObjectId(String(contactId)) },
-            { projection: { campaign_id: 1, config_id: 1 } }
-        );
-        return pickNonEmpty(doc?.campaign_id, doc?.config_id);
-    } catch (err) {
-        logger.warn("[Webhook] resolveCampaignIdFromContact failed", {
-            contactId: String(contactId),
-            error: err.message,
-        });
-        return null;
-    }
-}
-
 async function enrichIdentityFromContact(identity) {
     if (!identity?.contact_id || identity.campaign_id) return identity;
     const campaign_id = await resolveCampaignIdFromContact(identity.contact_id);
@@ -252,6 +229,10 @@ async function enrichIdentityFromCallLog(identity) {
                     break;
                 }
             }
+        }
+
+        if (contact_id && !campaign_id) {
+            campaign_id = await resolveCampaignIdFromContact(contact_id);
         }
 
         if (!contact_id && !campaign_id) return identity;
@@ -630,6 +611,32 @@ async function handleEventWebhook(body) {
                 `${event} duration=${dur}s ${statusSource}`,
                 identity
             );
+
+            if (!isInboundLog && hangupStatus === 3 && dur > 0) {
+                let campaignIdForCredit = identity.campaign_id;
+                if (!campaignIdForCredit && contact_id) {
+                    campaignIdForCredit = await resolveCampaignIdFromContact(contact_id);
+                }
+                if (campaignIdForCredit) {
+                    const creditResult = await tryDeductCampaignCallCredits({
+                        callUniqueId: identity.normalizedCallId || call_id,
+                        contactId: contact_id,
+                        campaignId: campaignIdForCredit,
+                        durationSec: dur,
+                    });
+                    logger.info("[Webhook] Campaign credit deduction", {
+                        call_id: identity.normalizedCallId || call_id,
+                        campaign_id: campaignIdForCredit,
+                        ...creditResult,
+                    });
+                } else {
+                    logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
+                        call_id: identity.normalizedCallId || call_id,
+                        contact_id,
+                    });
+                }
+            }
+
             // Outbound ondial.ai notify: only when inbound call ends (not on ring/initiated/answered)
             if (isInboundLog && docKey) {
                 await markInboundConversationCompleted(docKey);
