@@ -191,10 +191,42 @@ app.get("/api/v1/sse/listen", (req, res) => {
 });
 
 
-// NOTE: /api/call-mapping has been removed.
-// The telephony webhook now carries `customParameters.{contact_id, campaign_id, call_unique_id}`
-// (normalized in webhookHandler), so identity is resolved directly from the webhook payload.
-// Inbound mapping (/api/inbound-mapping) and Twilio mapping (/api/twilio-mapping) remain.
+// NOTE: Legacy /api/call-mapping removed — use /api/outbound-call-mapping from the dialer worker.
+// Telephony webhooks still carry customParameters when the provider echoes them; this endpoint
+// seeds Redis when hangup/completed events omit contact_id.
+
+// ─── Outbound call_unique_id mapping (worker → Redis) ─────────────────────────
+app.post("/api/outbound-call-mapping", async (req, res) => {
+    res.status(200).json({ received: true });
+
+    const body = req.body || {};
+    const callKey = normalizeCallId(body.call_unique_id || body.call_id);
+    const contactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+    const campaignId = body.campaign_id != null ? String(body.campaign_id) : "";
+    const phone = normalizePhone(body.phone || body.to || body.mobile);
+
+    if (!callKey || !contactId) {
+        logger.warn("[OutboundMapping] Missing call_unique_id or contact_id — skipping", {
+            call_unique_id: body.call_unique_id || body.call_id || null,
+            contact_id: contactId || null,
+        });
+        return;
+    }
+
+    await registerCallMapping({
+        call_id: callKey,
+        lead_id: body.lead_id != null ? String(body.lead_id) : callKey,
+        campaign_id: campaignId,
+        contact_id: contactId,
+        phone: phone || "",
+    });
+
+    logger.info("[OutboundMapping] Stored Redis mapping", {
+        call_id: callKey,
+        contact_id: contactId,
+        campaign_id: campaignId || null,
+    });
+});
 
 // ─── FLOW 2B: Twilio SID Mapping Endpoint ───────────────────────────────────
 // Receives: { call_sid | twilio_call_sid | CallSid, call_id?, lead_id?, campaign_id, contact_id }

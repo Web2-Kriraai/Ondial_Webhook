@@ -17,6 +17,7 @@ const {
     appendCallEvent,
     INBOUNDCALLLOG_COLLECTION,
     markInboundConversationCompleted,
+    resolveCollection,
 } = require("./callLogs");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
@@ -205,6 +206,86 @@ async function enrichIdentityFromContact(identity) {
     return { ...identity, campaign_id };
 }
 
+/** Dialer trace ids (UUID) — never use broad phone fallback when only this id is known. */
+function looksLikeCallUniqueId(id) {
+    const s = id != null ? String(id).trim() : "";
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
+/**
+ * Later webhooks often omit customParameters; recover contact/campaign from CallLogs
+ * written on call_initiated / call_ringing when contact_id was present.
+ */
+async function enrichIdentityFromCallLog(identity) {
+    if (identity?.contact_id && identity?.campaign_id) return identity;
+
+    const key = pickNonEmpty(identity?.lead_id, identity?.normalizedCallId, identity?.call_unique_id);
+    if (!key) return identity;
+
+    try {
+        const db = getDb();
+        const collectionName = resolveCollection({ contact_id: identity?.contact_id });
+        const doc = await db.collection(collectionName).findOne(
+            {
+                $or: [{ lead_id: String(key) }, { call_id: String(key) }],
+            },
+            { projection: { contact_id: 1, campaign_id: 1, "call_data.events": 1 } }
+        );
+        if (!doc) return identity;
+
+        let contact_id = pickNonEmpty(identity.contact_id, doc.contact_id);
+        let campaign_id = pickNonEmpty(identity.campaign_id, doc.campaign_id);
+
+        if (!contact_id && Array.isArray(doc.call_data?.events)) {
+            for (const ev of doc.call_data.events) {
+                const data = ev?.data;
+                if (!data || typeof data !== "object") continue;
+                const fromFlat = pickNonEmpty(data.contact_id, data.contactId);
+                const cp = data.customParameters || data.custom_parameters;
+                const fromCp =
+                    cp && typeof cp === "object"
+                        ? pickNonEmpty(cp.contact_id, cp.contactId)
+                        : null;
+                const found = pickNonEmpty(fromFlat, fromCp);
+                if (found) {
+                    contact_id = found;
+                    break;
+                }
+            }
+        }
+
+        if (!contact_id && !campaign_id) return identity;
+
+        logger.info("[Webhook] Recovered identity from CallLogs", {
+            call_key: key,
+            contact_id: contact_id || null,
+            campaign_id: campaign_id || null,
+        });
+
+        return {
+            ...identity,
+            contact_id: contact_id || identity.contact_id,
+            campaign_id: campaign_id || identity.campaign_id,
+        };
+    } catch (err) {
+        logger.warn("[Webhook] enrichIdentityFromCallLog failed", { error: err.message, key });
+        return identity;
+    }
+}
+
+async function persistCallMappingFromIdentity(identity, phone) {
+    const mapCallId = identity?.normalizedCallId || normalizeCallId(identity?.callId);
+    const contact_id = identity?.contact_id;
+    if (!mapCallId || !contact_id) return;
+    await registerCallMapping({
+        call_id: mapCallId,
+        lead_id: identity.lead_id || mapCallId,
+        campaign_id: identity.campaign_id || "",
+        contact_id,
+        phone: phone || "",
+    });
+}
+
 /**
  * Payload-first identity resolver.
  *
@@ -250,12 +331,26 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
         let mapping = await lookupMapping(callId);
         const inboundByCallId = mapping?.collectionName === INBOUNDCALLLOG_COLLECTION;
 
-        if (!mapping?.contact_id && mobileRaw && !inboundByCallId) {
+        if (!mapping?.contact_id) {
+            const fromLog = await enrichIdentityFromCallLog({
+                contact_id: null,
+                campaign_id: precomputed?.campaign_id || null,
+                lead_id: precomputed?.lead_id || null,
+                normalizedCallId: normalizeCallId(callId),
+                call_unique_id: precomputed?.call_unique_id || null,
+            });
+            if (fromLog.contact_id) {
+                contact_id = fromLog.contact_id;
+                campaign_id = campaign_id || fromLog.campaign_id || null;
+            }
+        }
+
+        if (!mapping?.contact_id && mobileRaw && !inboundByCallId && !contact_id) {
             const byPhone = await lookupMappingByPhone(mobileRaw);
             if (byPhone) mapping = byPhone;
         }
 
-        contact_id = mapping?.contact_id || null;
+        contact_id = contact_id || mapping?.contact_id || null;
         campaign_id = campaign_id || mapping?.campaign_id || null;
         collectionName = collectionName || mapping?.collectionName || null;
     }
@@ -288,7 +383,21 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
         return;
     }
 
-    logger.warn(`[Webhook] No mapping for call_id=${normalizeCallId(callId)} — falling back to broad phone match`);
+    const normCallId = normalizeCallId(callId);
+    if (looksLikeCallUniqueId(normCallId) || looksLikeCallUniqueId(precomputed?.call_unique_id)) {
+        logger.error(
+            `[Webhook] Refusing phone fallback — call_unique_id=${normCallId} has no contact_id (wrong-contact risk)`,
+            { context, to: mobileRaw || null }
+        );
+        callEvents.emit("call_update", {
+            call_id: callId,
+            status: newStatus,
+            timestamp: new Date().toISOString(),
+        });
+        return;
+    }
+
+    logger.warn(`[Webhook] No mapping for call_id=${normCallId} — falling back to broad phone match`);
     const updateResult = await updateByMobile(mobileRaw, newStatus, context);
     const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
 
@@ -383,9 +492,11 @@ async function handleEventWebhook(body) {
         mapping = await lookupMappingByPhone(to);
     }
     let identity = resolveIdentityFromPayload(body, mapping);
+    identity = await enrichIdentityFromCallLog(identity);
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
+    await persistCallMappingFromIdentity(identity, to);
 
     const lead_id = identity.lead_id;
     const contact_id = identity.contact_id;
@@ -408,7 +519,11 @@ async function handleEventWebhook(body) {
         callStatus: body?.callStatus || null,
         answered: body?.answered ?? null,
         direction: body?.direction || null,
-        source: mapping ? "redis+payload" : "payload-only",
+        source: mapping
+            ? "redis+payload"
+            : identity.contact_id && !pickNonEmpty(body?.contact_id)
+              ? "calllog-recovered"
+              : "payload-only",
         isInbound: isInboundLog,
     });
 
@@ -458,16 +573,6 @@ async function handleEventWebhook(body) {
             // Asterisk call_id) can still do a precise contact lookup by phone.
             // Harmless no-op when mapping doesn't exist (new payload-first flow).
             if (event === "call_initiated") {
-                const mapCallId = identity.normalizedCallId || normalizeCallId(call_id);
-                if (mapCallId && contact_id) {
-                    await registerCallMapping({
-                        call_id: mapCallId,
-                        lead_id: identity.lead_id || mapCallId,
-                        campaign_id: identity.campaign_id || "",
-                        contact_id,
-                        phone: to,
-                    });
-                }
                 await enrichPhoneMapping(call_id, to);
             }
             // Do NOT update DB — worker already sets status=1 when call is placed.
