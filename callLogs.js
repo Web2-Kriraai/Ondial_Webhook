@@ -444,6 +444,9 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
                     $ifNull: ["$provider_call_id", String(options.providerCallId)],
                 };
             }
+            if (options.isTestCall === true) {
+                identitySet.isTestCall = { $literal: true };
+            }
         }
 
         // Separate stages avoid the "Updating path 'call_data.events' would create a conflict

@@ -13,6 +13,7 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
+const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
 const { isDirectPhoneContactId } = require("./lib/directContactId");
@@ -612,6 +613,7 @@ async function handleEventWebhook(body) {
                 callUniqueId: identity.call_unique_id || docKey,
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
+                isTestCall: inferIsTestCallFromWebhookBody(body),
             });
         } else {
             logger.warn("[Webhook] Outbound event missing both lead_id and call_id — skipping append", { event });
@@ -842,6 +844,7 @@ async function handleSummaryWebhook(body) {
                 callUniqueId: identity.call_unique_id || cdrCallKey,
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
+                isTestCall: inferIsTestCallFromWebhookBody(body),
             });
         } else {
             logger.warn("[Webhook] Outbound summary missing both lead_id and Call_UniqueId — skipping append");
