@@ -228,6 +228,7 @@ async function processOutboundHangupBilling({
     durationSec,
     recordingUrl,
     callStatus,
+    toPhone,
 }) {
     const resolved = await resolveStoredOutboundIdentity(
         {
@@ -238,7 +239,7 @@ async function processOutboundHangupBilling({
             contact_id: contact_id || identity.contact_id,
             campaign_id: identity.campaign_id,
         },
-        { backfillCallLog: true }
+        { backfillCallLog: true, toPhone }
     );
     const effectiveContactId = pickNonEmpty(contact_id, resolved.contact_id);
     let campaignIdForCredit = pickNonEmpty(resolved.campaign_id, identity.campaign_id);
@@ -529,7 +530,7 @@ async function handleEventWebhook(body) {
         mapping = await lookupMappingByPhone(to);
     }
     let identity = resolveIdentityFromPayload(body, mapping);
-    identity = await resolveStoredOutboundIdentity(identity);
+    identity = await resolveStoredOutboundIdentity(identity, { toPhone: to });
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
@@ -694,6 +695,7 @@ async function handleEventWebhook(body) {
                     durationSec: dur,
                     recordingUrl,
                     callStatus: body?.callStatus,
+                    toPhone: to,
                 });
             }
 
@@ -858,6 +860,7 @@ async function handleSummaryWebhook(body) {
             durationSec: dur,
             recordingUrl: RecordingURL || null,
             callStatus: CallStatus,
+            toPhone: To_number,
         });
     }
 }
