@@ -14,6 +14,7 @@ const {
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
+const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
 const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
 const { finalizeOutboundCallLog } = require("./lib/finalizeOutboundCallLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
@@ -196,75 +197,14 @@ function looksLikeCallUniqueId(id) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 }
 
-/**
- * Later webhooks often omit customParameters; recover contact/campaign from CallLogs
- * written on call_initiated / call_ringing when contact_id was present.
- */
+/** @deprecated name kept — delegates to resolveStoredOutboundIdentity */
 async function enrichIdentityFromCallLog(identity) {
-    if (identity?.contact_id && identity?.campaign_id) return identity;
-
-    const key = pickNonEmpty(identity?.lead_id, identity?.normalizedCallId, identity?.call_unique_id);
-    if (!key) return identity;
-
-    try {
-        const db = getDb();
-        const keyFilter = { $or: [{ lead_id: String(key) }, { call_id: String(key) }] };
-        const projection = { contact_id: 1, campaign_id: 1, "call_data.events": 1 };
-
-        let doc = await db.collection(CALLLOGS_COLLECTION).findOne(keyFilter, { projection });
-        if (!doc) {
-            doc = await db.collection(TESTCALL_COLLECTION).findOne(keyFilter, { projection });
-        }
-
-        if (!doc) return identity;
-
-        let contact_id = pickNonEmpty(identity.contact_id, doc.contact_id);
-        let campaign_id = pickNonEmpty(identity.campaign_id, doc.campaign_id);
-
-        if (!contact_id && Array.isArray(doc.call_data?.events)) {
-            for (const ev of doc.call_data.events) {
-                const data = ev?.data;
-                if (!data || typeof data !== "object") continue;
-                const fromFlat = pickNonEmpty(data.contact_id, data.contactId);
-                const cp = data.customParameters || data.custom_parameters;
-                const fromCp =
-                    cp && typeof cp === "object"
-                        ? pickNonEmpty(cp.contact_id, cp.contactId)
-                        : null;
-                const found = pickNonEmpty(fromFlat, fromCp);
-                if (found) {
-                    contact_id = found;
-                    break;
-                }
-            }
-        }
-
-        if (contact_id && !campaign_id) {
-            campaign_id = await resolveCampaignIdFromContact(contact_id);
-        }
-
-        if (!contact_id && !campaign_id) return identity;
-
-        logger.info("[Webhook] Recovered identity from CallLogs", {
-            call_key: key,
-            contact_id: contact_id || null,
-            campaign_id: campaign_id || null,
-        });
-
-        const collectionName = await resolveOutboundCollection({
-            contact_id: contact_id || identity.contact_id,
-        });
-
-        return {
-            ...identity,
-            contact_id: contact_id || identity.contact_id,
-            campaign_id: campaign_id || identity.campaign_id,
-            collectionName,
-        };
-    } catch (err) {
-        logger.warn("[Webhook] enrichIdentityFromCallLog failed", { error: err.message, key });
-        return identity;
-    }
+    const merged = await resolveStoredOutboundIdentity(identity);
+    if (!merged.campaign_id && !merged.contact_id) return identity;
+    const collectionName = await resolveOutboundCollection({
+        contact_id: merged.contact_id || identity.contact_id,
+    });
+    return { ...merged, collectionName };
 }
 
 async function resolveIdentityCollection(identity, body) {
@@ -289,21 +229,34 @@ async function processOutboundHangupBilling({
     recordingUrl,
     callStatus,
 }) {
-    let campaignIdForCredit = identity.campaign_id;
-    if (!campaignIdForCredit && contact_id) {
-        campaignIdForCredit = await resolveCampaignIdFromContact(contact_id);
+    const resolved = await resolveStoredOutboundIdentity(
+        {
+            ...identity,
+            lead_id: lead_id || identity.lead_id,
+            normalizedCallId: callUniqueForFinalize,
+            call_unique_id: callUniqueForFinalize,
+            contact_id: contact_id || identity.contact_id,
+            campaign_id: identity.campaign_id,
+        },
+        { backfillCallLog: true }
+    );
+    const effectiveContactId = pickNonEmpty(contact_id, resolved.contact_id);
+    let campaignIdForCredit = pickNonEmpty(resolved.campaign_id, identity.campaign_id);
+    if (!campaignIdForCredit && effectiveContactId) {
+        campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
     }
     if (!campaignIdForCredit) {
         logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
             call_id: callUniqueForFinalize,
-            contact_id,
+            contact_id: effectiveContactId,
+            hint: "Ensure worker POST /api/outbound-call-mapping or test-predefined CallLogs shell before webhooks",
         });
         return;
     }
 
     const creditResult = await tryDeductCampaignCallCredits({
         callUniqueId: callUniqueForFinalize,
-        contactId: contact_id,
+        contactId: effectiveContactId,
         campaignId: campaignIdForCredit,
         durationSec,
     });
@@ -569,11 +522,14 @@ async function handleEventWebhook(body) {
     // - Skip phone-fallback Redis GET when payload already has contact_id.
     // - Still do one call_id Redis GET to detect inbound mapping coming from legacy /api/inbound-mapping.
     let mapping = await lookupMapping(call_id);
+    if (!mapping && body?.provider_call_id) {
+        mapping = await lookupMapping(body.provider_call_id);
+    }
     if (!mapping && !pickNonEmpty(body?.contact_id) && to) {
         mapping = await lookupMappingByPhone(to);
     }
     let identity = resolveIdentityFromPayload(body, mapping);
-    identity = await enrichIdentityFromCallLog(identity);
+    identity = await resolveStoredOutboundIdentity(identity);
     if (!identity.campaign_id && identity.contact_id) {
         identity = await enrichIdentityFromContact(identity);
     }
