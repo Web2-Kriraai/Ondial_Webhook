@@ -39,7 +39,15 @@ function normalizePhone(num) {
  * Store mapping: call_id → { lead_id, campaign_id, contact_id, phone }
  * Also indexes by phone so lookup works even when Asterisk changes call_id on answer.
  */
-async function registerCallMapping({ lead_id, call_id, campaign_id, contact_id, phone, collectionName }) {
+async function registerCallMapping({
+    lead_id,
+    call_id,
+    campaign_id,
+    contact_id,
+    phone,
+    collectionName,
+    is_test_call,
+}) {
     const key = normalizeCallId(call_id);
     if (!key) {
         logger.warn("[CallMapping] Invalid call_id, cannot store mapping");
@@ -51,6 +59,7 @@ async function registerCallMapping({ lead_id, call_id, campaign_id, contact_id, 
         campaign_id: String(campaign_id || ""),
         contact_id: String(contact_id || ""),
         phone: normalizePhone(phone) || "",
+        is_test_call: is_test_call === true,
         ...(collectionName ? { collectionName: String(collectionName) } : {}),
         storedAt: Date.now()
     };

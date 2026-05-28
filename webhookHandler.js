@@ -606,6 +606,7 @@ async function handleEventWebhook(body) {
                   )
                 : null;
         if (outboundKey) {
+            const mappedTest = mapping?.is_test_call === true;
             await appendCallEvent(outboundKey, event, body, eventRecordingUrl, {
                 contact_id,
                 campaign_id: identity.campaign_id,
@@ -613,7 +614,7 @@ async function handleEventWebhook(body) {
                 callUniqueId: identity.call_unique_id || docKey,
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
-                isTestCall: inferIsTestCallFromWebhookBody(body),
+                isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
             });
         } else {
             logger.warn("[Webhook] Outbound event missing both lead_id and call_id — skipping append", { event });
@@ -837,6 +838,7 @@ async function handleSummaryWebhook(body) {
         const outboundKey =
             identity.call_unique_id || cdrCallKey || (isUuidCallKey(lead_id) ? lead_id : null) || lead_id;
         if (outboundKey) {
+            const mappedTest = mapping?.is_test_call === true;
             await appendCallEvent(outboundKey, "cdr_push", body, RecordingURL || null, {
                 contact_id,
                 campaign_id: identity.campaign_id,
@@ -844,7 +846,7 @@ async function handleSummaryWebhook(body) {
                 callUniqueId: identity.call_unique_id || cdrCallKey,
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
-                isTestCall: inferIsTestCallFromWebhookBody(body),
+                isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
             });
         } else {
             logger.warn("[Webhook] Outbound summary missing both lead_id and Call_UniqueId — skipping append");

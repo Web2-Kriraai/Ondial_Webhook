@@ -223,6 +223,7 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         contact_id: contactId,
         phone: phone || "",
         collectionName,
+        is_test_call: body?.is_test_call === true || body?.is_test_call === 'true',
     });
 
     logger.info("[OutboundMapping] Stored Redis mapping", {
