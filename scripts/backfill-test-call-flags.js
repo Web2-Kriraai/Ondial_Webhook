@@ -1,5 +1,5 @@
 /**
- * One-off: set isTestCall on CallLogs where events show callType=agent or is_test_call.
+ * One-off: set isTestCall on CallLogs where events explicitly show is_test_call/isTestCall.
  * Usage: MONGODB_URI=... node scripts/backfill-test-call-flags.js [campaignId]
  */
 const { MongoClient } = require('mongodb');
@@ -13,9 +13,9 @@ function inferFromDoc(log) {
   for (const event of events) {
     const call = event?.data?._raw?.call || event?.data?.call;
     if (!call) continue;
-    if (String(call.callType || '').toLowerCase() === 'agent') return true;
-    const cp = call.customParameters;
+    const cp = call.customParameters && typeof call.customParameters === 'object' ? call.customParameters : null;
     if (cp?.is_test_call === true || cp?.is_test_call === 'true') return true;
+    if (cp?.isTestCall === true || cp?.isTestCall === 'true') return true;
   }
   return false;
 }
