@@ -162,6 +162,14 @@ function mapTwilioStatusToCallReceiveStatus(statusRaw) {
     return null;
 }
 
+function stringifyPayload(payload) {
+    try {
+        return JSON.stringify(payload || {});
+    } catch (err) {
+        return JSON.stringify({ stringify_error: err.message });
+    }
+}
+
 function normalizeTwilioConversationTurn(raw, idx) {
     if (!raw || typeof raw !== "object") return null;
     const roleRaw = raw.role || raw.speaker || raw.from || "unknown";
@@ -335,6 +343,12 @@ app.post("/api/twilio-mapping", async (req, res) => {
     res.status(200).json({ received: true });
 
     const body = req.body || {};
+    logger.info("[Twilio] Mapping webhook payload", {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+        payload: stringifyPayload(body),
+    });
     const { call_sid, twilio_call_sid, CallSid, call_id, lead_id, campaign_id, contact_id } = body;
     const sid = normalizeTwilioCallSid(call_sid || twilio_call_sid || CallSid);
     const callIdNorm = normalizeCallId(call_id);
@@ -422,7 +436,15 @@ app.post("/twilio/call-status", async (req, res) => {
     //     return res.status(401).json({ received: false, error: "unauthorized" });
     // }
 
-    const { CallSid, CallStatus, CallDuration, Timestamp } = req.body || {};
+    const body = req.body || {};
+    logger.info("[Twilio] Status webhook payload", {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+        payload: stringifyPayload(body),
+    });
+
+    const { CallSid, CallStatus, CallDuration, Timestamp } = body;
     const missingFields = [];
     if (!CallSid) missingFields.push("CallSid");
     if (!CallStatus) missingFields.push("CallStatus");
@@ -604,6 +626,12 @@ app.post("/twilio/call-status", async (req, res) => {
 // Receives: { CallSid, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
 app.post("/twilio/conversation", async (req, res) => {
     const body = req.body || {};
+    logger.info("[Twilio] Conversation webhook payload", {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+        payload: stringifyPayload(body),
+    });
     const sid = normalizeTwilioCallSid(body.CallSid || body.call_sid || body.twilio_call_sid);
     if (!sid) {
         return res.status(400).json({
