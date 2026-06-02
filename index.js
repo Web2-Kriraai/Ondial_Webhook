@@ -162,6 +162,96 @@ function mapTwilioStatusToCallReceiveStatus(statusRaw) {
     return null;
 }
 
+function normalizeTwilioConversationTurn(raw, idx) {
+    if (!raw || typeof raw !== "object") return null;
+    const roleRaw = raw.role || raw.speaker || raw.from || "unknown";
+    const role = String(roleRaw).trim().toLowerCase() || "unknown";
+    const textRaw = raw.text || raw.content || raw.message || raw.utterance || "";
+    const text = String(textRaw || "").trim();
+    if (!text) return null;
+    const tsRaw = raw.timestamp || raw.ts || raw.time || null;
+    const ts = tsRaw ? new Date(tsRaw) : null;
+    return {
+        role,
+        text,
+        timestamp:
+            ts && !Number.isNaN(ts.getTime()) ? ts.toISOString() : new Date(Date.now() + idx).toISOString(),
+    };
+}
+
+function normalizeTwilioConversationPayload(body) {
+    const turnsRaw = Array.isArray(body?.turns)
+        ? body.turns
+        : Array.isArray(body?.conversation)
+          ? body.conversation
+          : Array.isArray(body?.messages)
+            ? body.messages
+            : null;
+
+    let turns = Array.isArray(turnsRaw)
+        ? turnsRaw
+              .map((row, idx) => normalizeTwilioConversationTurn(row, idx))
+              .filter(Boolean)
+        : [];
+
+    const transcriptRaw =
+        typeof body?.transcript === "string"
+            ? body.transcript
+            : typeof body?.conversation_text === "string"
+              ? body.conversation_text
+              : "";
+    const transcript = String(transcriptRaw || "").trim();
+    if (turns.length === 0 && transcript) {
+        turns = [
+            {
+                role: "transcript",
+                text: transcript,
+                timestamp: new Date().toISOString(),
+            },
+        ];
+    }
+    return {
+        turns: turns.slice(0, 500),
+        transcript,
+    };
+}
+
+function buildLegacyConversationShape({ turns, transcript, startTime, endTime }) {
+    const legacyTurns = Array.isArray(turns)
+        ? turns
+              .map((t) => {
+                  const role = String(t?.role || "").trim().toLowerCase();
+                  const text = String(t?.text || "").trim();
+                  if (!text) return null;
+                  const speaker =
+                      role === "assistant" || role === "ai"
+                          ? "AI"
+                          : role === "customer" || role === "user" || role === "human"
+                            ? "User"
+                            : role || "User";
+                  return { [speaker]: text };
+              })
+              .filter(Boolean)
+        : [];
+
+    const transcriptText =
+        String(transcript || "").trim() ||
+        legacyTurns
+            .map((row) => {
+                const [speaker] = Object.keys(row);
+                return `${speaker}: ${row[speaker]}`;
+            })
+            .join(" ");
+
+    const out = {
+        turns: legacyTurns,
+        transcript: transcriptText,
+    };
+    if (startTime) out.start_time = startTime;
+    if (endTime) out.end_time = endTime;
+    return out;
+}
+
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
@@ -508,6 +598,143 @@ app.post("/twilio/call-status", async (req, res) => {
         Timestamp: timestampValue.toISOString(),
     });
     return res.status(200).json({ received: true, updated: true });
+});
+
+// ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
+// Receives: { CallSid, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
+app.post("/twilio/conversation", async (req, res) => {
+    const body = req.body || {};
+    const sid = normalizeTwilioCallSid(body.CallSid || body.call_sid || body.twilio_call_sid);
+    if (!sid) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_required_fields",
+            missing: ["CallSid"],
+        });
+    }
+
+    const normalizedConversation = normalizeTwilioConversationPayload(body);
+    if (!normalizedConversation.turns.length) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_conversation_payload",
+            details: "Provide `turns`, `conversation`, `messages`, or `transcript`.",
+        });
+    }
+
+    const twilioMapping = await lookupTwilioCallSidMapping(sid);
+    const eventDoc = {
+        timestamp: new Date().toISOString(),
+        event_type: "twilio_conversation_upserted",
+        data: {
+            CallSid: sid,
+            turn_count: normalizedConversation.turns.length,
+        },
+    };
+
+    const startTimeRaw =
+        typeof body.start_time === "string"
+            ? body.start_time
+            : typeof body.startTime === "string"
+              ? body.startTime
+              : null;
+    const endTimeRaw =
+        typeof body.end_time === "string"
+            ? body.end_time
+            : typeof body.endTime === "string"
+              ? body.endTime
+              : null;
+    const normalizedStartTime =
+        startTimeRaw && !Number.isNaN(new Date(startTimeRaw).getTime())
+            ? new Date(startTimeRaw).toISOString()
+            : null;
+    const normalizedEndTime =
+        endTimeRaw && !Number.isNaN(new Date(endTimeRaw).getTime())
+            ? new Date(endTimeRaw).toISOString()
+            : null;
+
+    const legacyConversation = buildLegacyConversationShape({
+        turns: normalizedConversation.turns,
+        transcript: normalizedConversation.transcript,
+        startTime: normalizedStartTime,
+        endTime: normalizedEndTime,
+    });
+
+    const twilioSetFields = {
+        "twilio.call_sid": sid,
+        "twilio.conversation.updatedAt": new Date().toISOString(),
+        "twilio.conversation.turns": normalizedConversation.turns,
+        "twilio.conversation.turnCount": normalizedConversation.turns.length,
+        "twilio.conversation.transcript": legacyConversation.transcript,
+        "conversation.turns": legacyConversation.turns,
+        "conversation.transcript": legacyConversation.transcript,
+    };
+    if (legacyConversation.start_time) {
+        twilioSetFields["conversation.start_time"] = legacyConversation.start_time;
+    }
+    if (legacyConversation.end_time) {
+        twilioSetFields["conversation.end_time"] = legacyConversation.end_time;
+    }
+
+    const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
+    const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
+    const INBOUNDCALLLOG_COLLECTION = process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation";
+    const allCollections = [CALLLOGS_COLLECTION, TESTCALL_COLLECTION, INBOUNDCALLLOG_COLLECTION];
+    const mappedCollection =
+        twilioMapping?.collectionName && allCollections.includes(String(twilioMapping.collectionName))
+            ? String(twilioMapping.collectionName)
+            : null;
+    const fallbackContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+    const primaryCollection =
+        mappedCollection ||
+        resolveCollection({ contact_id: twilioMapping?.contact_id || fallbackContactId }) ||
+        CALLLOGS_COLLECTION;
+    const collectionsOrdered = [...new Set([primaryCollection, ...allCollections])];
+
+    let updated = false;
+    for (const collectionName of collectionsOrdered) {
+        const ok = await mergeTwilioStatusIntoCallLog(
+            collectionName,
+            { "twilio.call_sid": sid },
+            twilioSetFields,
+            eventDoc
+        );
+        if (ok) {
+            updated = true;
+            break;
+        }
+    }
+
+    if (!updated) {
+        const fallbackCampaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
+        const fallbackLeadId = body.lead_id != null ? String(body.lead_id).trim() : "";
+        const fallbackCallId = body.call_id != null ? String(body.call_id).trim() : "";
+        updated = await upsertTwilioAnchoredCallLog({
+            collectionName: primaryCollection,
+            twilioCallSid: sid,
+            twilioSetFields,
+            eventDoc,
+            rootFromMapping: {
+                campaign_id: twilioMapping?.campaign_id || fallbackCampaignId,
+                contact_id: twilioMapping?.contact_id || fallbackContactId,
+                lead_id: twilioMapping?.lead_id || fallbackLeadId,
+                call_id: twilioMapping?.call_id || fallbackCallId,
+            },
+        });
+    }
+
+    logger.info("[Twilio] Conversation stored", {
+        CallSid: sid,
+        turnCount: normalizedConversation.turns.length,
+        collection: primaryCollection,
+        hadMapping: !!twilioMapping,
+    });
+    return res.status(200).json({
+        received: true,
+        updated: !!updated,
+        callSid: sid,
+        turnCount: normalizedConversation.turns.length,
+    });
 });
 
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
