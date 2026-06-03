@@ -25,6 +25,7 @@ const logger = require("./logger");
 const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
+const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const crypto = require("crypto");
 
 const app = express();
@@ -619,6 +620,15 @@ app.post("/twilio/call-status", async (req, res) => {
         CallDuration: duration,
         Timestamp: timestampValue.toISOString(),
     });
+
+    if (status.toLowerCase() === "completed") {
+        triggerCallAnalysis(normalizedCallSid).catch((err) => {
+            logger.warn("[Twilio] Analysis trigger failed after call-status", {
+                CallSid: normalizedCallSid,
+                error: err.message,
+            });
+        });
+    }
     return res.status(200).json({ received: true, updated: true });
 });
 
@@ -757,6 +767,15 @@ app.post("/twilio/conversation", async (req, res) => {
         collection: primaryCollection,
         hadMapping: !!twilioMapping,
     });
+
+    // Best-effort analysis trigger for Twilio calls once conversation is available.
+    triggerCallAnalysis(sid).catch((err) => {
+        logger.warn("[Twilio] Analysis trigger failed after conversation store", {
+            CallSid: sid,
+            error: err.message,
+        });
+    });
+
     return res.status(200).json({
         received: true,
         updated: !!updated,

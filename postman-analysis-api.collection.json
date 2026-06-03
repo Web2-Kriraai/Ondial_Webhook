@@ -1,0 +1,100 @@
+{
+  "info": {
+    "name": "Ondial Call Analysis API",
+    "_postman_id": "f6c42288-4f67-4f34-9d63-5ca2bb2cd521",
+    "description": "Collection for /analyze/call endpoint with sales, recruitment, and minimal payloads.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://72.60.221.48:5000"
+    }
+  ],
+  "item": [
+    {
+      "name": "Analyze Call - Sales",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"service_name\": \"sales\",\n  \"reason_for_calling\": \"Introduce the product and check interest.\",\n  \"conversation\": {\n    \"turns\": [\n      { \"Agent\": \"Hi, calling from Ondial.\" },\n      { \"User\": \"Not interested right now.\" }\n    ]\n  },\n  \"questions\": [\n    { \"question\": \"What is your budget?\", \"expectedAnswer\": \"text\" }\n  ],\n  \"classifications\": [\n    { \"name\": \"Positive\", \"description\": \"Interested in offer\" },\n    { \"name\": \"Negative\", \"description\": \"Not interested\" }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/analyze/call",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "analyze",
+            "call"
+          ]
+        },
+        "description": "Non-recruitment example with optional questions and classifications."
+      },
+      "response": []
+    },
+    {
+      "name": "Analyze Call - Recruitment",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"service_name\": \"recruitment\",\n  \"reason_for_calling\": \"Screen candidates for role fit.\",\n  \"conversation\": {\n    \"turns\": [\n      { \"Agent\": \"Hello, is this a good time for screening?\" },\n      { \"User\": \"Yes, please continue.\" }\n    ]\n  },\n  \"questions\": [\n    { \"question\": \"What is your notice period?\", \"expectedAnswer\": \"text\" }\n  ],\n  \"classifications\": [\n    { \"name\": \"Should Hire\", \"description\": \"Meets requirements\" },\n    { \"name\": \"Should Not Hire\", \"description\": \"Does not meet requirements\" }\n  ],\n  \"recruitment_config\": {\n    \"jobTitle\": \"AI ML Developer\",\n    \"jobDescription\": \"Build ML systems and LLM apps.\",\n    \"experienceMin\": 4,\n    \"experienceMax\": 7,\n    \"keySkills\": [\"Python\", \"LLMs\"],\n    \"employmentTypes\": [\"full_time\"],\n    \"workModes\": [\"on_site\"],\n    \"locations\": [\"Surat\"],\n    \"salaryMin\": 1000000,\n    \"salaryMax\": 2000000,\n    \"salaryUndisclosed\": false,\n    \"difficultyLevel\": \"easy\",\n    \"screeningQuestions\": [],\n    \"questionBankQuestions\": [],\n    \"customQuestions\": []\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/analyze/call",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "analyze",
+            "call"
+          ]
+        },
+        "description": "Recruitment example with required recruitment_config."
+      },
+      "response": []
+    },
+    {
+      "name": "Analyze Call - Minimal",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"service_name\": \"sales\",\n  \"reason_for_calling\": \"Quick call quality analysis.\",\n  \"conversation\": {\n    \"turns\": [\n      { \"Agent\": \"Hello!\" },\n      { \"User\": \"Hi.\" }\n    ]\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/analyze/call",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "analyze",
+            "call"
+          ]
+        },
+        "description": "Minimal required fields only."
+      },
+      "response": []
+    }
+  ]
+}
