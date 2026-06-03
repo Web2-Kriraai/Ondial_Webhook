@@ -544,23 +544,35 @@ app.post("/twilio/call-status", async (req, res) => {
         if (updated) break;
     }
 
-    if (!updated && twilioMapping) {
+    if (!updated) {
+        const fallbackContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+        const fallbackCampaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
+        const fallbackLeadId = body.lead_id != null ? String(body.lead_id).trim() : "";
+        const fallbackCallId = body.call_id != null ? String(body.call_id).trim() : "";
         updated = await upsertTwilioAnchoredCallLog({
             collectionName: primaryCollection,
             twilioCallSid: normalizedCallSid,
             twilioSetFields,
             eventDoc,
             rootFromMapping: {
-                campaign_id: twilioMapping.campaign_id,
-                contact_id: twilioMapping.contact_id,
-                lead_id: twilioMapping.lead_id,
-                call_id: mappedCallId,
+                campaign_id: twilioMapping?.campaign_id || fallbackCampaignId,
+                contact_id: twilioMapping?.contact_id || fallbackContactId,
+                lead_id: twilioMapping?.lead_id || fallbackLeadId,
+                call_id: mappedCallId || fallbackCallId,
             },
         });
+        if (updated) {
+            logger.info("[Twilio] Call status anchored via upsert (no prior doc)", {
+                CallSid: normalizedCallSid,
+                CallStatus: status,
+                CallDuration: duration,
+                hadMapping: !!twilioMapping,
+            });
+        }
     }
 
     if (!updated) {
-        logger.warn("[Twilio] Call status update received for unknown CallSid", {
+        logger.warn("[Twilio] Call status update could not be stored", {
             CallSid: normalizedCallSid,
             CallStatus: status,
             Timestamp,
