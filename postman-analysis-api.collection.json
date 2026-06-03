@@ -2,18 +2,41 @@
   "info": {
     "name": "Ondial Call Analysis API",
     "_postman_id": "f6c42288-4f67-4f34-9d63-5ca2bb2cd521",
-    "description": "Collection for /analyze/call endpoint with sales, recruitment, and minimal payloads.",
+    "description": "Webhook default: POST {{baseUrl}}/analyze/call/{{callId}} (no body). Body JSON examples below are reference only until ANALYSIS_USE_BODY_PAYLOAD=1.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "baseUrl",
       "value": "http://72.60.221.48:5000"
+    },
+    {
+      "key": "callId",
+      "value": "53433625-9eb8-401e-96e6-e1228b3ff50f"
     }
   ],
   "item": [
     {
-      "name": "Analyze Call - Sales",
+      "name": "Analyze Call - Legacy (active in webhook)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/analyze/call/{{callId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["analyze", "call", "{{callId}}"]
+        },
+        "description": "Matches ondial-webhook default: callId in URL, empty body. API reads conversation from Mongo."
+      },
+      "response": []
+    },
+    {
+      "name": "[Reference] Body payload - Sales",
       "request": {
         "method": "POST",
         "header": [
@@ -28,20 +51,15 @@
         },
         "url": {
           "raw": "{{baseUrl}}/analyze/call",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "analyze",
-            "call"
-          ]
+          "host": ["{{baseUrl}}"],
+          "path": ["analyze", "call"]
         },
-        "description": "Non-recruitment example with optional questions and classifications."
+        "description": "Not used by webhook unless ANALYSIS_USE_BODY_PAYLOAD=1 in .env."
       },
       "response": []
     },
     {
-      "name": "Analyze Call - Recruitment",
+      "name": "[Reference] Body payload - Recruitment",
       "request": {
         "method": "POST",
         "header": [
@@ -56,20 +74,15 @@
         },
         "url": {
           "raw": "{{baseUrl}}/analyze/call",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "analyze",
-            "call"
-          ]
+          "host": ["{{baseUrl}}"],
+          "path": ["analyze", "call"]
         },
-        "description": "Recruitment example with required recruitment_config."
+        "description": "Not used by webhook unless ANALYSIS_USE_BODY_PAYLOAD=1 in .env."
       },
       "response": []
     },
     {
-      "name": "Analyze Call - Minimal",
+      "name": "[Reference] Body payload - Minimal",
       "request": {
         "method": "POST",
         "header": [
@@ -84,15 +97,10 @@
         },
         "url": {
           "raw": "{{baseUrl}}/analyze/call",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "analyze",
-            "call"
-          ]
+          "host": ["{{baseUrl}}"],
+          "path": ["analyze", "call"]
         },
-        "description": "Minimal required fields only."
+        "description": "Not used by webhook unless ANALYSIS_USE_BODY_PAYLOAD=1 in .env."
       },
       "response": []
     }

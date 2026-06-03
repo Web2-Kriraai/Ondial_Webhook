@@ -634,7 +634,7 @@ app.post("/twilio/call-status", async (req, res) => {
     });
 
     if (status.toLowerCase() === "completed") {
-        triggerCallAnalysis(normalizedCallSid).catch((err) => {
+        triggerCallAnalysis(normalizedCallSid, { deferIfNoTurns: true }).catch((err) => {
             logger.warn("[Twilio] Analysis trigger failed after call-status", {
                 CallSid: normalizedCallSid,
                 error: err.message,
