@@ -633,14 +633,6 @@ app.post("/twilio/call-status", async (req, res) => {
         Timestamp: timestampValue.toISOString(),
     });
 
-    if (status.toLowerCase() === "completed") {
-        triggerCallAnalysis(normalizedCallSid, { deferIfNoTurns: true }).catch((err) => {
-            logger.warn("[Twilio] Analysis trigger failed after call-status", {
-                CallSid: normalizedCallSid,
-                error: err.message,
-            });
-        });
-    }
     return res.status(200).json({ received: true, updated: true });
 });
 
@@ -710,6 +702,13 @@ app.post("/twilio/conversation", async (req, res) => {
         endTime: normalizedEndTime,
     });
 
+    const dialerCallUniqueId =
+        body.call_unique_id != null && String(body.call_unique_id).trim() !== ""
+            ? String(body.call_unique_id).trim()
+            : body.call_id != null && String(body.call_id).trim() !== ""
+              ? String(body.call_id).trim()
+              : "";
+
     const twilioSetFields = {
         "twilio.call_sid": sid,
         "twilio.conversation.updatedAt": new Date().toISOString(),
@@ -724,6 +723,10 @@ app.post("/twilio/conversation", async (req, res) => {
     }
     if (legacyConversation.end_time) {
         twilioSetFields["conversation.end_time"] = legacyConversation.end_time;
+    }
+    if (dialerCallUniqueId) {
+        twilioSetFields.call_unique_id = dialerCallUniqueId;
+        twilioSetFields["twilio.external_call_id"] = dialerCallUniqueId;
     }
 
     const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
@@ -758,7 +761,7 @@ app.post("/twilio/conversation", async (req, res) => {
     if (!updated) {
         const fallbackCampaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
         const fallbackLeadId = body.lead_id != null ? String(body.lead_id).trim() : "";
-        const fallbackCallId = body.call_id != null ? String(body.call_id).trim() : "";
+        const fallbackCallId = dialerCallUniqueId;
         updated = await upsertTwilioAnchoredCallLog({
             collectionName: primaryCollection,
             twilioCallSid: sid,
