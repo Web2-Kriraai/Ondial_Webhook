@@ -139,10 +139,12 @@ function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIs
  */
 async function mergeTwilioStatusIntoCallLog(collectionName, filter, twilioSetFields, eventDoc) {
     const db = getDb();
-    const rootSet = { ...twilioSetFields, updatedAt: new Date() };
+    const now = new Date();
+    const rootSet = { ...twilioSetFields, updatedAt: now };
     const pipeline = [
         { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
         { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+        { $set: { createdAt: { $ifNull: ["$createdAt", now] } } },
         { $set: rootSet },
         {
             $set: {
@@ -177,6 +179,7 @@ async function upsertTwilioAnchoredCallLog({
     const externalCall = externalCallRaw ? normalizeCallId(externalCallRaw) || externalCallRaw : "";
 
     const syntheticLeadId = `twilio:${twilioCallSid}`;
+    const now = new Date();
 
     const $set = {
         ...twilioSetFields,
@@ -184,7 +187,7 @@ async function upsertTwilioAnchoredCallLog({
         lead_id: syntheticLeadId,
         call_id: twilioCallSid,
         call_direction: "outbound",
-        updatedAt: new Date(),
+        updatedAt: now,
     };
     if (campaignId) $set.campaign_id = campaignId;
     if (contactId) $set.contact_id = contactId;
@@ -192,7 +195,7 @@ async function upsertTwilioAnchoredCallLog({
     if (externalCall) $set["twilio.external_call_id"] = externalCall;
 
     const $setOnInsert = {
-        createdAt: new Date().toISOString(),
+        createdAt: now,
         recordingUrl: "",
     };
 

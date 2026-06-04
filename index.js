@@ -163,12 +163,48 @@ function mapTwilioStatusToCallReceiveStatus(statusRaw) {
     return null;
 }
 
-function stringifyPayload(payload) {
+function cloneJsonSafe(value) {
     try {
-        return JSON.stringify(payload || {});
+        return JSON.parse(JSON.stringify(value ?? {}));
+    } catch (err) {
+        return { clone_error: err.message };
+    }
+}
+
+function formatJsonPretty(value) {
+    try {
+        return JSON.stringify(value ?? {}, null, 2);
     } catch (err) {
         return JSON.stringify({ stringify_error: err.message });
     }
+}
+
+function extractTwilioCallSidFromBody(body) {
+    return (
+        normalizeTwilioCallSid(body?.CallSid || body?.call_sid || body?.twilio_call_sid) || null
+    );
+}
+
+/** Logs Twilio webhook as nested JSON object + pretty multi-line block in PM2 output. */
+function logTwilioWebhookEvent(req, label, body) {
+    const event = cloneJsonSafe(body);
+    const callSid = extractTwilioCallSidFromBody(body);
+    const envelope = {
+        method: req.method,
+        url: req.originalUrl,
+        ip: req.ip,
+        callSid,
+        event,
+    };
+
+    logger.info(label, envelope);
+    console.log(`\n${label}\n${formatJsonPretty(envelope)}\n`);
+}
+
+function logTwilioEventData(label, data) {
+    const event = cloneJsonSafe(data);
+    logger.info(label, { event });
+    console.log(`\n${label}\n${formatJsonPretty(event)}\n`);
 }
 
 function normalizeTwilioConversationTurn(raw, idx) {
@@ -233,8 +269,8 @@ function buildLegacyConversationShape({ turns, transcript, startTime, endTime })
                   const text = String(t?.text || "").trim();
                   if (!text) return null;
                   const speaker =
-                      role === "assistant" || role === "ai"
-                          ? "AI"
+                      role === "assistant" || role === "ai" || role === "agent" || role === "bot"
+                          ? "Agent"
                           : role === "customer" || role === "user" || role === "human"
                             ? "User"
                             : role || "User";
@@ -344,12 +380,7 @@ app.post("/api/twilio-mapping", async (req, res) => {
     res.status(200).json({ received: true });
 
     const body = req.body || {};
-    logger.info("[Twilio] Mapping webhook payload", {
-        method: req.method,
-        url: req.originalUrl,
-        ip: req.ip,
-        payload: stringifyPayload(body),
-    });
+    logTwilioWebhookEvent(req, "[Twilio] Mapping webhook payload", body);
     const { call_sid, twilio_call_sid, CallSid, call_id, lead_id, campaign_id, contact_id } = body;
     const sid = normalizeTwilioCallSid(call_sid || twilio_call_sid || CallSid);
     const callIdNorm = normalizeCallId(call_id);
@@ -438,12 +469,7 @@ app.post("/twilio/call-status", async (req, res) => {
     // }
 
     const body = req.body || {};
-    logger.info("[Twilio] Status webhook payload", {
-        method: req.method,
-        url: req.originalUrl,
-        ip: req.ip,
-        payload: stringifyPayload(body),
-    });
+    logTwilioWebhookEvent(req, "[Twilio] Status webhook payload", body);
 
     const { CallSid, CallStatus, CallDuration, Timestamp } = body;
     const missingFields = [];
@@ -562,7 +588,7 @@ app.post("/twilio/call-status", async (req, res) => {
             },
         });
         if (updated) {
-            logger.info("[Twilio] Call status anchored via upsert (no prior doc)", {
+            logTwilioEventData("[Twilio] Call status anchored via upsert (no prior doc)", {
                 CallSid: normalizedCallSid,
                 CallStatus: status,
                 CallDuration: duration,
@@ -626,11 +652,13 @@ app.post("/twilio/call-status", async (req, res) => {
         }
     }
 
-    logger.info("[Twilio] Call status updated", {
+    logTwilioEventData("[Twilio] Call status updated", {
         CallSid: normalizedCallSid,
         CallStatus: status,
         CallDuration: duration,
         Timestamp: timestampValue.toISOString(),
+        twilioSetFields,
+        call_data_event: eventDoc,
     });
 
     return res.status(200).json({ received: true, updated: true });
@@ -640,12 +668,7 @@ app.post("/twilio/call-status", async (req, res) => {
 // Receives: { CallSid, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
 app.post("/twilio/conversation", async (req, res) => {
     const body = req.body || {};
-    logger.info("[Twilio] Conversation webhook payload", {
-        method: req.method,
-        url: req.originalUrl,
-        ip: req.ip,
-        payload: stringifyPayload(body),
-    });
+    logTwilioWebhookEvent(req, "[Twilio] Conversation webhook payload", body);
     const sid = normalizeTwilioCallSid(body.CallSid || body.call_sid || body.twilio_call_sid);
     if (!sid) {
         return res.status(400).json({
@@ -776,11 +799,42 @@ app.post("/twilio/conversation", async (req, res) => {
         });
     }
 
-    logger.info("[Twilio] Conversation stored", {
+    const db = getDb();
+    const storedDoc = await db.collection(primaryCollection).findOne(
+        { "twilio.call_sid": sid },
+        {
+            projection: {
+                _id: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                campaign_id: 1,
+                contact_id: 1,
+                "conversation.turns": 1,
+                "twilio.conversation.turnCount": 1,
+                "twilio.status": 1,
+            },
+        }
+    );
+    const storedTurnCount =
+        (Array.isArray(storedDoc?.conversation?.turns) ? storedDoc.conversation.turns.length : 0) ||
+        storedDoc?.twilio?.conversation?.turnCount ||
+        0;
+
+    logTwilioEventData("[Twilio] Conversation stored in CallLogs", {
         CallSid: sid,
         turnCount: normalizedConversation.turns.length,
+        storedTurnCount,
+        hasConversationInDb: storedTurnCount > 0,
         collection: primaryCollection,
+        docId: storedDoc?._id ? String(storedDoc._id) : null,
+        createdAt: storedDoc?.createdAt || null,
+        updatedAt: storedDoc?.updatedAt || null,
+        campaign_id: storedDoc?.campaign_id || null,
+        contact_id: storedDoc?.contact_id || null,
+        twilioStatus: storedDoc?.twilio?.status || null,
         hadMapping: !!twilioMapping,
+        conversation: legacyConversation,
+        call_data_event: eventDoc,
     });
 
     // Best-effort analysis trigger for Twilio calls once conversation is available.
