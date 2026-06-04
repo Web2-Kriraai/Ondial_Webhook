@@ -27,6 +27,7 @@ const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSna
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
+const { pickNonEmpty } = require("./lib/customParameters");
 const {
     syncTwilioContactReceiveStatus,
     maybeDeductTwilioCallCredits,
@@ -618,7 +619,17 @@ app.post("/twilio/call-status", async (req, res) => {
     await syncTwilioContactReceiveStatus(contactForSync, status);
 
     let creditResult = null;
-    if (status.toLowerCase() === "completed" && duration != null && duration > 0) {
+    const statusCampaignId = pickNonEmpty(
+        twilioMapping?.campaign_id,
+        body?.campaign_id
+    );
+    // Conversation webhook usually carries campaign_id; avoid noisy no_campaign_id on status-only.
+    if (
+        status.toLowerCase() === "completed" &&
+        duration != null &&
+        duration > 0 &&
+        statusCampaignId
+    ) {
         creditResult = await maybeDeductTwilioCallCredits({
             callSid: normalizedCallSid,
             durationSec: duration,
@@ -626,6 +637,8 @@ app.post("/twilio/call-status", async (req, res) => {
             body,
             collectionName: primaryCollection,
         });
+    } else if (status.toLowerCase() === "completed" && duration > 0 && !statusCampaignId) {
+        creditResult = { outcome: "defer_until_conversation" };
     }
 
     logTwilioEventData("[Twilio] Call status updated", {
@@ -794,6 +807,8 @@ app.post("/twilio/conversation", async (req, res) => {
                 "conversation.turns": 1,
                 "twilio.conversation.turnCount": 1,
                 "twilio.status": 1,
+                "twilio.duration": 1,
+                isTestCall: 1,
             },
         }
     );
@@ -814,6 +829,7 @@ app.post("/twilio/conversation", async (req, res) => {
         campaign_id: storedDoc?.campaign_id || null,
         contact_id: storedDoc?.contact_id || null,
         twilioStatus: storedDoc?.twilio?.status || null,
+        twilioDuration: storedDoc?.twilio?.duration ?? null,
         hadMapping: !!twilioMapping,
         conversation: legacyConversation,
         call_data_event: eventDoc,
@@ -824,10 +840,9 @@ app.post("/twilio/conversation", async (req, res) => {
         0,
         Math.floor(Number(storedDoc?.twilio?.duration) || 0)
     );
-    if (
-        String(storedDoc?.twilio?.status || "").toLowerCase() === "completed" &&
-        billableDuration > 0
-    ) {
+    const twilioCompleted =
+        String(storedDoc?.twilio?.status || "").toLowerCase() === "completed";
+    if (twilioCompleted && billableDuration > 0) {
         creditResult = await maybeDeductTwilioCallCredits({
             callSid: sid,
             durationSec: billableDuration,
@@ -835,6 +850,8 @@ app.post("/twilio/conversation", async (req, res) => {
             body,
             collectionName: primaryCollection,
         });
+    } else if (twilioCompleted && billableDuration <= 0) {
+        creditResult = { outcome: "skip_no_duration_on_doc" };
     }
 
     // Best-effort analysis trigger for Twilio calls once conversation is available.
