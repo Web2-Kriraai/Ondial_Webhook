@@ -731,6 +731,8 @@ app.post("/twilio/conversation", async (req, res) => {
             : body.call_id != null && String(body.call_id).trim() !== ""
               ? String(body.call_id).trim()
               : "";
+    const fallbackContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+    const fallbackCampaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
 
     const twilioSetFields = {
         "twilio.call_sid": sid,
@@ -741,6 +743,8 @@ app.post("/twilio/conversation", async (req, res) => {
         "conversation.turns": legacyConversation.turns,
         "conversation.transcript": legacyConversation.transcript,
     };
+    if (fallbackCampaignId) twilioSetFields.campaign_id = fallbackCampaignId;
+    if (fallbackContactId) twilioSetFields.contact_id = fallbackContactId;
     if (legacyConversation.start_time) {
         twilioSetFields["conversation.start_time"] = legacyConversation.start_time;
     }
@@ -760,7 +764,6 @@ app.post("/twilio/conversation", async (req, res) => {
         twilioMapping?.collectionName && allCollections.includes(String(twilioMapping.collectionName))
             ? String(twilioMapping.collectionName)
             : null;
-    const fallbackContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
     const primaryCollection =
         mappedCollection ||
         resolveCollection({ contact_id: twilioMapping?.contact_id || fallbackContactId }) ||
@@ -782,7 +785,6 @@ app.post("/twilio/conversation", async (req, res) => {
     }
 
     if (!updated) {
-        const fallbackCampaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
         const fallbackLeadId = body.lead_id != null ? String(body.lead_id).trim() : "";
         const fallbackCallId = dialerCallUniqueId;
         updated = await upsertTwilioAnchoredCallLog({
