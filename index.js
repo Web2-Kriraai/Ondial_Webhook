@@ -26,6 +26,11 @@ const callEvents = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
+const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
+const {
+    syncTwilioContactReceiveStatus,
+    maybeDeductTwilioCallCredits,
+} = require("./lib/twilioCallBilling");
 const crypto = require("crypto");
 
 const app = express();
@@ -152,15 +157,6 @@ function verifyIngressAuth(req, { allowHmac = true, allowBearer = true, secretEn
         }
     });
     return false;
-}
-
-function mapTwilioStatusToCallReceiveStatus(statusRaw) {
-    const status = String(statusRaw || "").trim().toLowerCase();
-    if (status === "in-progress") return 2;
-    if (status === "completed") return 3;
-    if (status === "busy") return 1;
-    // initiated/ringing (and others) should not force DB status update.
-    return null;
 }
 
 function cloneJsonSafe(value) {
@@ -418,6 +414,7 @@ app.post("/api/twilio-mapping", async (req, res) => {
             campaign_id: campaignId,
             contact_id: contactId,
             collectionName: targetCollection,
+            is_test_call: body?.is_test_call === true || body?.is_test_call === "true",
         });
 
         const setPayload = {
@@ -528,6 +525,9 @@ app.post("/twilio/call-status", async (req, res) => {
     if (status.toLowerCase() === "completed") {
         twilioSetFields["twilio.completedAt"] = timestampValue.toISOString();
     }
+    if (inferIsTestCallFromWebhookBody(body) || twilioMapping?.is_test_call === true) {
+        twilioSetFields.isTestCall = true;
+    }
 
     const eventDoc = buildTwilioStatusEvent({
         CallSid: normalizedCallSid,
@@ -611,45 +611,21 @@ app.post("/twilio/call-status", async (req, res) => {
         });
     }
 
-    const db = getDb();
-    const mappedContactId = twilioMapping?.contact_id ? String(twilioMapping.contact_id).trim() : "";
-    const statusToApply = mapTwilioStatusToCallReceiveStatus(status);
-    if (mappedContactId && statusToApply != null) {
-        if (/^[a-fA-F0-9]{24}$/.test(mappedContactId)) {
-            try {
-                const result = await db.collection("contactprocessings").updateOne(
-                    { _id: new ObjectId(mappedContactId) },
-                    { $set: { callReceiveStatus: statusToApply, updatedAt: new Date() } }
-                );
-                if (result.matchedCount === 0) {
-                    logger.warn("[Twilio] Mapped contact_id not found for status sync", {
-                        CallSid: normalizedCallSid,
-                        contact_id: mappedContactId,
-                        status,
-                    });
-                } else {
-                    logger.info("[Twilio] contactprocessings status synced", {
-                        CallSid: normalizedCallSid,
-                        contact_id: mappedContactId,
-                        callReceiveStatus: statusToApply,
-                        twilioStatus: status,
-                    });
-                }
-            } catch (err) {
-                logger.error("[Twilio] Failed to sync contactprocessings status", {
-                    CallSid: normalizedCallSid,
-                    contact_id: mappedContactId,
-                    status,
-                    error: err.message,
-                });
-            }
-        } else {
-            logger.warn("[Twilio] Skipping status sync: contact_id is not a Mongo ObjectId", {
-                CallSid: normalizedCallSid,
-                contact_id: mappedContactId,
-                status,
-            });
-        }
+    const bodyContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+    const contactForSync = twilioMapping?.contact_id
+        ? String(twilioMapping.contact_id).trim()
+        : bodyContactId;
+    await syncTwilioContactReceiveStatus(contactForSync, status);
+
+    let creditResult = null;
+    if (status.toLowerCase() === "completed" && duration != null && duration > 0) {
+        creditResult = await maybeDeductTwilioCallCredits({
+            callSid: normalizedCallSid,
+            durationSec: duration,
+            twilioMapping,
+            body,
+            collectionName: primaryCollection,
+        });
     }
 
     logTwilioEventData("[Twilio] Call status updated", {
@@ -659,9 +635,10 @@ app.post("/twilio/call-status", async (req, res) => {
         Timestamp: timestampValue.toISOString(),
         twilioSetFields,
         call_data_event: eventDoc,
+        credit: creditResult,
     });
 
-    return res.status(200).json({ received: true, updated: true });
+    return res.status(200).json({ received: true, updated: true, credit: creditResult });
 });
 
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
@@ -745,6 +722,9 @@ app.post("/twilio/conversation", async (req, res) => {
     };
     if (fallbackCampaignId) twilioSetFields.campaign_id = fallbackCampaignId;
     if (fallbackContactId) twilioSetFields.contact_id = fallbackContactId;
+    if (inferIsTestCallFromWebhookBody(body) || twilioMapping?.is_test_call === true) {
+        twilioSetFields.isTestCall = true;
+    }
     if (legacyConversation.start_time) {
         twilioSetFields["conversation.start_time"] = legacyConversation.start_time;
     }
@@ -839,6 +819,24 @@ app.post("/twilio/conversation", async (req, res) => {
         call_data_event: eventDoc,
     });
 
+    let creditResult = null;
+    const billableDuration = Math.max(
+        0,
+        Math.floor(Number(storedDoc?.twilio?.duration) || 0)
+    );
+    if (
+        String(storedDoc?.twilio?.status || "").toLowerCase() === "completed" &&
+        billableDuration > 0
+    ) {
+        creditResult = await maybeDeductTwilioCallCredits({
+            callSid: sid,
+            durationSec: billableDuration,
+            twilioMapping,
+            body,
+            collectionName: primaryCollection,
+        });
+    }
+
     // Best-effort analysis trigger for Twilio calls once conversation is available.
     triggerCallAnalysis(sid).catch((err) => {
         logger.warn("[Twilio] Analysis trigger failed after conversation store", {
@@ -852,6 +850,7 @@ app.post("/twilio/conversation", async (req, res) => {
         updated: !!updated,
         callSid: sid,
         turnCount: normalizedConversation.turns.length,
+        credit: creditResult,
     });
 });
 

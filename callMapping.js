@@ -184,6 +184,7 @@ async function registerTwilioCallSidMapping({
     campaign_id,
     contact_id,
     collectionName,
+    is_test_call,
 }) {
     const sid = normalizeTwilioCallSid(twilio_call_sid);
     if (!sid) {
@@ -198,6 +199,7 @@ async function registerTwilioCallSidMapping({
         campaign_id: String(campaign_id || ""),
         contact_id: String(contact_id || ""),
         collectionName: collectionName ? String(collectionName) : "",
+        is_test_call: is_test_call === true,
         updatedAt: Date.now(),
     };
 
