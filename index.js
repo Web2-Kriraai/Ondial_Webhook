@@ -28,10 +28,11 @@ const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { pickNonEmpty } = require("./lib/customParameters");
+const { maybeDeductTwilioCallCredits } = require("./lib/twilioCallBilling");
 const {
-    syncTwilioContactReceiveStatus,
-    maybeDeductTwilioCallCredits,
-} = require("./lib/twilioCallBilling");
+    resolveTwilioContactId,
+    syncTwilioContactFromCall,
+} = require("./lib/twilioContactSync");
 const crypto = require("crypto");
 
 const app = express();
@@ -612,11 +613,15 @@ app.post("/twilio/call-status", async (req, res) => {
         });
     }
 
-    const bodyContactId = body.contact_id != null ? String(body.contact_id).trim() : "";
-    const contactForSync = twilioMapping?.contact_id
-        ? String(twilioMapping.contact_id).trim()
-        : bodyContactId;
-    await syncTwilioContactReceiveStatus(contactForSync, status);
+    const contactForSync = resolveTwilioContactId({ twilioMapping, body });
+    const contactSyncResult = contactForSync
+        ? await syncTwilioContactFromCall({
+              contactIdRaw: contactForSync,
+              twilioStatus: status,
+              callSid: normalizedCallSid,
+              source: "twilio_call_status",
+          })
+        : { outcome: "skip_no_contact_id" };
 
     let creditResult = null;
     const statusCampaignId = pickNonEmpty(
@@ -649,9 +654,15 @@ app.post("/twilio/call-status", async (req, res) => {
         twilioSetFields,
         call_data_event: eventDoc,
         credit: creditResult,
+        contactSync: contactSyncResult,
     });
 
-    return res.status(200).json({ received: true, updated: true, credit: creditResult });
+    return res.status(200).json({
+        received: true,
+        updated: true,
+        credit: creditResult,
+        contactSync: contactSyncResult,
+    });
 });
 
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
@@ -817,6 +828,22 @@ app.post("/twilio/conversation", async (req, res) => {
         storedDoc?.twilio?.conversation?.turnCount ||
         0;
 
+    const contactForSync = resolveTwilioContactId({
+        twilioMapping,
+        body,
+        storedDoc,
+    });
+    const twilioStatusForContact = String(storedDoc?.twilio?.status || "").trim();
+    let contactSyncResult = { outcome: "skip_no_contact_id" };
+    if (contactForSync && twilioStatusForContact) {
+        contactSyncResult = await syncTwilioContactFromCall({
+            contactIdRaw: contactForSync,
+            twilioStatus: twilioStatusForContact,
+            callSid: sid,
+            source: "twilio_conversation",
+        });
+    }
+
     logTwilioEventData("[Twilio] Conversation stored in CallLogs", {
         CallSid: sid,
         turnCount: normalizedConversation.turns.length,
@@ -831,6 +858,7 @@ app.post("/twilio/conversation", async (req, res) => {
         twilioStatus: storedDoc?.twilio?.status || null,
         twilioDuration: storedDoc?.twilio?.duration ?? null,
         hadMapping: !!twilioMapping,
+        contactSync: contactSyncResult,
         conversation: legacyConversation,
         call_data_event: eventDoc,
     });
@@ -868,6 +896,7 @@ app.post("/twilio/conversation", async (req, res) => {
         callSid: sid,
         turnCount: normalizedConversation.turns.length,
         credit: creditResult,
+        contactSync: contactSyncResult,
     });
 });
 
