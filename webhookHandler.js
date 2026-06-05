@@ -19,7 +19,6 @@ const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundId
 const { isDirectPhoneContactId } = require("./lib/directContactId");
 const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
 const { finalizeOutboundCallLog } = require("./lib/finalizeOutboundCallLog");
-const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { syncTestCallMirror } = require("./lib/syncTestCallMirror");
 const {
     appendCallEvent,
@@ -285,12 +284,6 @@ async function processOutboundHangupBilling({
             callId: callUniqueForFinalize,
             leadId: lead_id,
             set: mirror,
-        });
-        triggerCallAnalysis(callUniqueForFinalize).catch((err) => {
-            logger.warn("[Webhook] Analysis trigger failed", {
-                call_id: callUniqueForFinalize,
-                error: err.message,
-            });
         });
     } else if (creditResult.outcome !== "disabled") {
         await syncTestCallMirror({
