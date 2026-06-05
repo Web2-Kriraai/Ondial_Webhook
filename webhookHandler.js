@@ -33,7 +33,7 @@ const {
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
-const callEvents = require("./events");
+const { emitCallUpdateSse } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 
@@ -394,25 +394,23 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     if (contact_id) {
         const updateResult = await updateByContactId(contact_id, newStatus, context);
         const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
-        if (campaign_id || isInboundMapping) {
-            callEvents.emit("call_update", {
-                campaign_id: campaign_id || null,
-                call_id: callId,
-                contact_id,
-                status: emittedStatus,
-                timestamp: new Date().toISOString()
-            });
-        }
+        emitCallUpdateSse({
+            campaign_id: campaign_id || null,
+            call_id: callId,
+            contact_id,
+            status: emittedStatus,
+            event: context || 'call_update',
+        });
         return;
     }
 
     if (isInboundMapping) {
-        callEvents.emit("call_update", {
+        emitCallUpdateSse({
             campaign_id: campaign_id || null,
             call_id: callId,
             contact_id: null,
             status: newStatus,
-            timestamp: new Date().toISOString()
+            event: context || 'call_update',
         });
         return;
     }
@@ -423,10 +421,10 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
             `[Webhook] Refusing phone fallback — call_unique_id=${normCallId} has no contact_id (wrong-contact risk)`,
             { context, to: mobileRaw || null }
         );
-        callEvents.emit("call_update", {
+        emitCallUpdateSse({
             call_id: callId,
             status: newStatus,
-            timestamp: new Date().toISOString(),
+            event: context || 'call_update',
         });
         return;
     }
@@ -435,10 +433,10 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     const updateResult = await updateByMobile(mobileRaw, newStatus, context);
     const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
 
-    callEvents.emit("call_update", {
+    emitCallUpdateSse({
         call_id: callId,
         status: emittedStatus,
-        timestamp: new Date().toISOString()
+        event: context || 'call_update',
     });
 }
 
@@ -635,11 +633,11 @@ async function handleEventWebhook(body) {
             logger.info(`[Webhook] Ignoring ${event} for call_id=${call_id} — no DB update`);
 
             // Fire SSE anyway so UI call logs reload the ringing/initiated state
-            callEvents.emit("call_update", {
+            emitCallUpdateSse({
                 campaign_id: identity.campaign_id || null,
                 call_id,
+                contact_id: contact_id || null,
                 event,
-                timestamp: new Date().toISOString()
             });
             break;
 
