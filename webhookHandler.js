@@ -325,6 +325,13 @@ function extractRecordingFromBody(body) {
     );
 }
 
+function inboundCallContext(body) {
+    return {
+        toPhone: pickNonEmpty(body?.to, body?._raw?.call?.to, body?.To_number),
+        fromPhone: pickNonEmpty(body?.from, body?._raw?.call?.from, body?.From_Number),
+    };
+}
+
 function inboundAppendOptions(anchor, identity, contact_id) {
     if (!anchor?.filter) return {};
     return {
@@ -337,9 +344,9 @@ function inboundAppendOptions(anchor, identity, contact_id) {
     };
 }
 
-async function enrichInboundIdentityFromAnchor(identity, docKey) {
+async function enrichInboundIdentityFromAnchor(identity, docKey, context = {}) {
     if (!docKey) return { identity, anchor: null };
-    const anchor = await resolveInboundConversationAnchor(docKey);
+    const anchor = await resolveInboundConversationAnchor(docKey, context);
     let next = identity;
     if (anchor.campaignId && !next.campaign_id) {
         next = { ...next, campaign_id: anchor.campaignId };
@@ -353,6 +360,8 @@ async function enrichInboundIdentityFromAnchor(identity, docKey) {
             callSid: anchor.callSid,
             config_id: anchor.campaignId,
             internalCallId: anchor.doc.call_id,
+            source: anchor.doc.source || null,
+            doc_filter: JSON.stringify(anchor.filter),
         });
     }
     return { identity: next, anchor };
@@ -367,9 +376,13 @@ async function processInboundHangupBilling({
     callStatus,
     inboundAnchor,
     toPhone,
+    fromPhone,
 }) {
     const anchor =
-        inboundAnchor || (callId ? await resolveInboundConversationAnchor(callId) : null);
+        inboundAnchor ||
+        (callId
+            ? await resolveInboundConversationAnchor(callId, { toPhone, fromPhone })
+            : null);
     const lookupFilter = anchor?.filter;
     const billingCallId = anchor?.providerCallId || callId;
 
@@ -405,6 +418,7 @@ async function processInboundHangupBilling({
         callStatus,
         collectionName: INBOUNDCALLLOG_COLLECTION,
         mongoFilter: lookupFilter,
+        mongoSyncFilter: anchor?.syncFilter,
     });
 
     const creditResult = await tryDeductCampaignCallCredits({
@@ -668,8 +682,9 @@ async function handleEventWebhook(body) {
     const docKey = identity.normalizedCallId;
 
     let inboundAnchor = null;
+    const inboundCtx = isInboundWebhook(body, identity, mapping) ? inboundCallContext(body) : null;
     if (isInboundLog && docKey) {
-        const enriched = await enrichInboundIdentityFromAnchor(identity, docKey);
+        const enriched = await enrichInboundIdentityFromAnchor(identity, docKey, inboundCtx || {});
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id;
@@ -718,7 +733,7 @@ async function handleEventWebhook(body) {
     if (isInboundLog) {
         if (docKey) {
             if (!inboundAnchor) {
-                inboundAnchor = await resolveInboundConversationAnchor(docKey);
+                inboundAnchor = await resolveInboundConversationAnchor(docKey, inboundCtx || {});
             }
             const eventRecordingUrl =
                 event === "call_hangup" ? extractRecordingFromBody(body) : null;
@@ -838,7 +853,7 @@ async function handleEventWebhook(body) {
 
             if (isInboundLog && docKey && hangupStatus === 3 && dur > 0) {
                 if (!inboundAnchor) {
-                    inboundAnchor = await resolveInboundConversationAnchor(docKey);
+                    inboundAnchor = await resolveInboundConversationAnchor(docKey, inboundCtx || {});
                 }
                 const inboundCreditResult = await processInboundHangupBilling({
                     identity,
@@ -849,11 +864,12 @@ async function handleEventWebhook(body) {
                     callStatus: body?.callStatus,
                     inboundAnchor,
                     toPhone: to,
+                    fromPhone: body?.from || null,
                 });
                 await finalizeInboundCallEnd(inboundAnchor, inboundCreditResult);
             } else if (isInboundLog && docKey) {
                 if (!inboundAnchor) {
-                    inboundAnchor = await resolveInboundConversationAnchor(docKey);
+                    inboundAnchor = await resolveInboundConversationAnchor(docKey, inboundCtx || {});
                 }
                 await finalizeInboundCallEnd(inboundAnchor, null);
             }
@@ -862,7 +878,9 @@ async function handleEventWebhook(body) {
 
         case "call_failed": {
             if (isInboundLog && docKey) {
-                const anchor = inboundAnchor || (await resolveInboundConversationAnchor(docKey));
+                const anchor =
+                    inboundAnchor ||
+                    (await resolveInboundConversationAnchor(docKey, inboundCtx || {}));
                 await markInboundConversationCompleted(anchor.filter);
             }
             // Technical failure (network, provider error) — status=0
@@ -922,11 +940,21 @@ async function handleSummaryWebhook(body) {
     const cdrCallKey = identity.normalizedCallId;
 
     let inboundAnchor = null;
+    const inboundCtx = isInboundLog ? inboundCallContext(body) : null;
     if (isInboundLog && cdrCallKey) {
-        const enriched = await enrichInboundIdentityFromAnchor(identity, cdrCallKey);
+        const enriched = await enrichInboundIdentityFromAnchor(identity, cdrCallKey, inboundCtx || {});
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id || null;
+        if (!identity.campaign_id && To_number) {
+            const billing = await resolveInboundBillingContext({
+                anchor: inboundAnchor,
+                toPhone: To_number,
+            });
+            if (billing.campaignId) {
+                identity = { ...identity, campaign_id: billing.campaignId };
+            }
+        }
     }
 
     console.log("[Webhook][Summary] received", {
@@ -987,7 +1015,7 @@ async function handleSummaryWebhook(body) {
 
     if (isInboundLog && cdrCallKey) {
         if (!inboundAnchor) {
-            inboundAnchor = await resolveInboundConversationAnchor(cdrCallKey);
+            inboundAnchor = await resolveInboundConversationAnchor(cdrCallKey, inboundCtx || {});
         }
         await appendCallEvent(cdrCallKey, "cdr_push", body, RecordingURL || null, {
             contact_id,
@@ -1006,6 +1034,7 @@ async function handleSummaryWebhook(body) {
                 callStatus: CallStatus,
                 inboundAnchor,
                 toPhone: To_number,
+                fromPhone: body?.From_Number || null,
             });
         }
         await finalizeInboundCallEnd(inboundAnchor, inboundCdrCredit);
