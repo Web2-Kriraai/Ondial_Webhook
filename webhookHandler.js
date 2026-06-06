@@ -392,12 +392,12 @@ async function processInboundHangupBilling({
     toPhone,
     fromPhone,
 }) {
-    const anchor =
+    let anchor =
         inboundAnchor ||
         (callId
             ? await resolveInboundConversationAnchor(callId, { toPhone, fromPhone })
             : null);
-    const lookupFilter = anchor?.filter;
+    let lookupFilter = anchor?.filter;
     const billingCallId = anchor?.providerCallId || callId;
 
     const billing = await resolveInboundBillingContext({ anchor, toPhone });
@@ -407,12 +407,13 @@ async function processInboundHangupBilling({
         billing.campaignId
     );
     if (callId && anchor?.callSid) {
-        await resolveInboundConversationAnchor(billingCallId, {
+        anchor = await resolveInboundConversationAnchor(billingCallId, {
             toPhone,
             fromPhone,
             campaignId: campaignIdForCredit,
             userId: billing.userId,
         });
+        lookupFilter = anchor?.syncFilter || anchor?.filter || lookupFilter;
     }
     const effectiveContactId = pickNonEmpty(contact_id, anchor?.contactId);
     if (!campaignIdForCredit && effectiveContactId) {
@@ -449,7 +450,8 @@ async function processInboundHangupBilling({
         campaignId: campaignIdForCredit,
         durationSec,
         callLogCollectionName: INBOUNDCALLLOG_COLLECTION,
-        callLogLookupFilter: lookupFilter,
+        callLogLookupFilter: anchor?.syncFilter || lookupFilter,
+        userId: pickNonEmpty(billing.userId, anchor?.userId),
     });
     logger.info("[Webhook] Inbound credit deduction", {
         call_id: billingCallId,
@@ -483,11 +485,12 @@ async function processInboundHangupBilling({
 async function finalizeInboundCallEnd(inboundAnchor, creditResult) {
     if (!inboundAnchor?.filter) return;
     await markInboundConversationCompleted(inboundAnchor.filter);
+    // Inbound is self-managed in webhook + Mongo. No ondial.ai API unless explicitly enabled.
+    const notifyInbound = process.env.ONDIAL_INBOUND_NOTIFY_ENABLED === "1";
+    const notifyOnMiss = process.env.ONDIAL_INBOUND_NOTIFY_ON_BILLING_MISS === "1";
     const billed =
         creditResult?.outcome === "deducted" || creditResult?.outcome === "already_billed";
-    const notifyEnabled = process.env.ONDIAL_INBOUND_NOTIFY_ENABLED !== "0";
-    const notifyOnMiss = process.env.ONDIAL_INBOUND_NOTIFY_ON_BILLING_MISS !== "0";
-    if (notifyEnabled && notifyOnMiss && !billed) {
+    if (notifyInbound && notifyOnMiss && !billed) {
         await notifyOndialInboundWebhook(
             inboundAnchor.providerCallId || inboundAnchor.doc?.call_id
         );
