@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node scripts/test-billing-guards.js && node scripts/test-analysis-call-id.js"
+    "test": "node scripts/test-billing-guards.js && node scripts/test-analysis-call-id.js && node scripts/test-inbound-doc-anchor.js"
   },
   "keywords": [],
   "author": "",
