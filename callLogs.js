@@ -438,6 +438,12 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             if (options.campaign_id) {
                 identitySet.config_id = { $ifNull: ["$config_id", String(options.campaign_id)] };
             }
+            if (options.toPhone) {
+                identitySet.to_number = { $ifNull: ["$to_number", String(options.toPhone)] };
+            }
+            if (options.fromPhone) {
+                identitySet.from_number = { $ifNull: ["$from_number", String(options.fromPhone)] };
+            }
         } else {
             const outboundLeadId = docFilter.lead_id;
             identitySet.lead_id = outboundLeadId;

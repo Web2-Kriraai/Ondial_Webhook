@@ -35,7 +35,8 @@ const logger = require("./logger");
 const { emitCallUpdateSse } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { isInboundWebhook } = require("./lib/inboundCall");
-const { resolveInboundConversationAnchor, syncInboundCompletionFields } = require("./lib/inboundDocAnchor");
+const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync } = require("./lib/inboundDocAnchor");
+const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 
@@ -332,7 +333,13 @@ function inboundCallContext(body) {
     };
 }
 
-function inboundAppendOptions(anchor, identity, contact_id) {
+function normalizeInboundPhoneForDoc(raw) {
+    if (!raw) return null;
+    const variants = phoneVariants(raw);
+    return variants.find((v) => v.startsWith("+")) || variants[0] || null;
+}
+
+function inboundAppendOptions(anchor, identity, contact_id, inboundCtx) {
     if (!anchor?.filter) return {};
     return {
         inboundDocFilter: anchor.filter,
@@ -341,12 +348,19 @@ function inboundAppendOptions(anchor, identity, contact_id) {
         campaign_id: pickNonEmpty(identity?.campaign_id, anchor.campaignId),
         contact_id: pickNonEmpty(contact_id, anchor.contactId),
         inboundPreserveCallId: anchor.doc?.call_id || anchor.providerCallId,
+        toPhone: normalizeInboundPhoneForDoc(inboundCtx?.toPhone),
+        fromPhone: normalizeInboundPhoneForDoc(inboundCtx?.fromPhone),
     };
 }
 
 async function enrichInboundIdentityFromAnchor(identity, docKey, context = {}) {
     if (!docKey) return { identity, anchor: null };
-    const anchor = await resolveInboundConversationAnchor(docKey, context);
+    const anchor = await resolveInboundConversationAnchor(docKey, {
+        toPhone: context.toPhone,
+        fromPhone: context.fromPhone,
+        campaignId: context.campaignId || identity.campaign_id,
+        userId: context.userId,
+    });
     let next = identity;
     if (anchor.campaignId && !next.campaign_id) {
         next = { ...next, campaign_id: anchor.campaignId };
@@ -392,6 +406,14 @@ async function processInboundHangupBilling({
         anchor?.campaignId,
         billing.campaignId
     );
+    if (callId && anchor?.callSid) {
+        await resolveInboundConversationAnchor(billingCallId, {
+            toPhone,
+            fromPhone,
+            campaignId: campaignIdForCredit,
+            userId: billing.userId,
+        });
+    }
     const effectiveContactId = pickNonEmpty(contact_id, anchor?.contactId);
     if (!campaignIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
@@ -437,7 +459,7 @@ async function processInboundHangupBilling({
     });
 
     if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
-        await syncInboundCompletionFields({
+        const syncParams = {
             callSid: anchor?.callSid,
             toPhone,
             fromPhone,
@@ -450,7 +472,9 @@ async function processInboundHangupBilling({
                 status: "completed",
                 ...(creditResult.cost != null ? { creditsDeductedAmount: creditResult.cost } : {}),
             },
-        });
+        };
+        await syncInboundCompletionFields(syncParams);
+        scheduleDeferredInboundCompletionSync(syncParams);
     }
 
     return creditResult;
@@ -759,7 +783,7 @@ async function handleEventWebhook(body) {
                 contact_id,
                 collectionName,
                 callId: docKey,
-                ...inboundAppendOptions(inboundAnchor, identity, contact_id),
+                ...inboundAppendOptions(inboundAnchor, identity, contact_id, inboundCtx),
             });
         } else {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
@@ -1039,7 +1063,7 @@ async function handleSummaryWebhook(body) {
             contact_id,
             collectionName,
             callId: cdrCallKey,
-            ...inboundAppendOptions(inboundAnchor, identity, contact_id),
+            ...inboundAppendOptions(inboundAnchor, identity, contact_id, inboundCtx),
         });
         let inboundCdrCredit = null;
         if (newStatus === 3 && dur > 0) {
