@@ -362,7 +362,8 @@ async function enrichInboundIdentityFromAnchor(identity, docKey, context = {}) {
         userId: context.userId,
     });
     let next = identity;
-    if (anchor.campaignId && !next.campaign_id) {
+    const isValidateDoc = anchor.doc?.source === "validate";
+    if (anchor.campaignId && !next.campaign_id && !isValidateDoc) {
         next = { ...next, campaign_id: anchor.campaignId };
     }
     if (anchor.contactId && !next.contact_id) {
@@ -402,9 +403,9 @@ async function processInboundHangupBilling({
 
     const billing = await resolveInboundBillingContext({ anchor, toPhone });
     let campaignIdForCredit = pickNonEmpty(
+        billing.campaignId,
         identity.campaign_id,
-        anchor?.campaignId,
-        billing.campaignId
+        anchor?.campaignId
     );
     if (callId && anchor?.callSid) {
         anchor = await resolveInboundConversationAnchor(billingCallId, {
@@ -733,7 +734,7 @@ async function handleEventWebhook(body) {
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id;
-        if (!identity.campaign_id && to) {
+        if (to && inboundAnchor) {
             const billing = await resolveInboundBillingContext({
                 anchor: inboundAnchor,
                 toPhone: to,
@@ -991,7 +992,7 @@ async function handleSummaryWebhook(body) {
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id || null;
-        if (!identity.campaign_id && To_number) {
+        if (To_number && inboundAnchor) {
             const billing = await resolveInboundBillingContext({
                 anchor: inboundAnchor,
                 toPhone: To_number,
