@@ -36,6 +36,7 @@ const { emitCallUpdateSse } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { isInboundWebhook } = require("./lib/inboundCall");
 const { resolveInboundConversationAnchor } = require("./lib/inboundDocAnchor");
+const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 
 /**
@@ -365,13 +366,19 @@ async function processInboundHangupBilling({
     recordingUrl,
     callStatus,
     inboundAnchor,
+    toPhone,
 }) {
     const anchor =
         inboundAnchor || (callId ? await resolveInboundConversationAnchor(callId) : null);
     const lookupFilter = anchor?.filter;
     const billingCallId = anchor?.providerCallId || callId;
 
-    let campaignIdForCredit = pickNonEmpty(identity.campaign_id, anchor?.campaignId);
+    const billing = await resolveInboundBillingContext({ anchor, toPhone });
+    let campaignIdForCredit = pickNonEmpty(
+        identity.campaign_id,
+        anchor?.campaignId,
+        billing.campaignId
+    );
     const effectiveContactId = pickNonEmpty(contact_id, anchor?.contactId);
     if (!campaignIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
@@ -381,8 +388,14 @@ async function processInboundHangupBilling({
             call_id: billingCallId,
             contact_id: effectiveContactId || null,
             call_sid: anchor?.callSid || null,
+            to: toPhone || null,
+            billing_source: billing.source || null,
         });
         return { outcome: "no_campaign_id" };
+    }
+
+    if (identity.campaign_id !== campaignIdForCredit) {
+        identity = { ...identity, campaign_id: campaignIdForCredit };
     }
 
     await finalizeOutboundCallLog({
@@ -660,6 +673,15 @@ async function handleEventWebhook(body) {
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id;
+        if (!identity.campaign_id && to) {
+            const billing = await resolveInboundBillingContext({
+                anchor: inboundAnchor,
+                toPhone: to,
+            });
+            if (billing.campaignId) {
+                identity = { ...identity, campaign_id: billing.campaignId };
+            }
+        }
     }
 
     console.log("[Webhook][Event] received", {
@@ -826,6 +848,7 @@ async function handleEventWebhook(body) {
                     recordingUrl: extractRecordingFromBody(body),
                     callStatus: body?.callStatus,
                     inboundAnchor,
+                    toPhone: to,
                 });
                 await finalizeInboundCallEnd(inboundAnchor, inboundCreditResult);
             } else if (isInboundLog && docKey) {
@@ -982,6 +1005,7 @@ async function handleSummaryWebhook(body) {
                 recordingUrl: RecordingURL || null,
                 callStatus: CallStatus,
                 inboundAnchor,
+                toPhone: To_number,
             });
         }
         await finalizeInboundCallEnd(inboundAnchor, inboundCdrCredit);
