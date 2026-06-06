@@ -35,7 +35,7 @@ const logger = require("./logger");
 const { emitCallUpdateSse } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { isInboundWebhook } = require("./lib/inboundCall");
-const { resolveInboundConversationAnchor } = require("./lib/inboundDocAnchor");
+const { resolveInboundConversationAnchor, syncInboundCompletionFields } = require("./lib/inboundDocAnchor");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 
@@ -435,6 +435,24 @@ async function processInboundHangupBilling({
         campaign_id: campaignIdForCredit,
         ...creditResult,
     });
+
+    if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
+        await syncInboundCompletionFields({
+            callSid: anchor?.callSid,
+            toPhone,
+            fromPhone,
+            providerCallId: billingCallId,
+            durationSec,
+            recordingUrl,
+            creditFields: {
+                creditsDeducted: true,
+                creditDeductionError: null,
+                status: "completed",
+                ...(creditResult.cost != null ? { creditsDeductedAmount: creditResult.cost } : {}),
+            },
+        });
+    }
+
     return creditResult;
 }
 
