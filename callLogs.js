@@ -245,18 +245,17 @@ async function markInboundConversationActive(normalizedCallId) {
 /**
  * InboundConversation: terminal state after hangup / CDR / failure. Idempotent.
  */
-async function markInboundConversationCompleted(normalizedCallId) {
-    if (!normalizedCallId) return;
+async function markInboundConversationCompleted(mongoFilter) {
+    if (!mongoFilter || typeof mongoFilter !== "object") return;
     try {
         const db = getDb();
-        await db.collection(INBOUNDCALLLOG_COLLECTION).updateOne(
-            { call_id: normalizedCallId },
-            { $set: { status: INBOUND_CONVERSATION_STATUS_COMPLETED, updatedAt: new Date() } }
-        );
+        await db.collection(INBOUNDCALLLOG_COLLECTION).updateOne(mongoFilter, {
+            $set: { status: INBOUND_CONVERSATION_STATUS_COMPLETED, updatedAt: new Date() },
+        });
     } catch (err) {
         logger.error("[CallLog] markInboundConversationCompleted failed", {
             error: err.message,
-            call_id: normalizedCallId,
+            filter: mongoFilter,
         });
     }
 }
@@ -367,17 +366,18 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
 
     let docFilter;
     let logLabel;
+    let inboundCid = null;
 
     if (inbound) {
-        const cid = normalizeCallId(
+        inboundCid = normalizeCallId(
             options.callId || eventData?.call_id || eventData?.Call_UniqueId
         );
-        if (!cid) {
+        if (!inboundCid && !options.inboundDocFilter) {
             logger.warn("[CallLog] appendCallEvent inbound: missing call_id in payload");
             return;
         }
-        docFilter = { call_id: cid };
-        logLabel = `call_id=${cid}`;
+        docFilter = options.inboundDocFilter || { call_id: inboundCid };
+        logLabel = JSON.stringify(docFilter);
     } else {
         const effectiveLeadId = resolveOutboundLeadId(lead_id, options);
         if (!effectiveLeadId) return;
@@ -419,15 +419,30 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             updatedAt: new Date(),
         };
         if (inbound) {
-            // call_id IS the filter key — must always be present.
-            identitySet.call_id = docFilter.call_id;
+            identitySet.call_id = {
+                $ifNull: ["$call_id", String(options.inboundPreserveCallId || inboundCid || "")],
+            };
             identitySet.call_direction = { $ifNull: ["$call_direction", "inbound"] };
             identitySet.status = { $ifNull: ["$status", INBOUND_CONVERSATION_STATUS_ACTIVE] };
+            if (options.inboundCallSid) {
+                identitySet.call_sid = { $ifNull: ["$call_sid", String(options.inboundCallSid)] };
+            }
+            if (options.providerCallId) {
+                identitySet.provider_call_id = {
+                    $ifNull: ["$provider_call_id", String(options.providerCallId)],
+                };
+            }
             if (options.contact_id) {
                 identitySet.contact_id = { $ifNull: ["$contact_id", String(options.contact_id)] };
             }
             if (options.campaign_id) {
                 identitySet.config_id = { $ifNull: ["$config_id", String(options.campaign_id)] };
+            }
+            if (options.toPhone) {
+                identitySet.to_number = { $ifNull: ["$to_number", String(options.toPhone)] };
+            }
+            if (options.fromPhone) {
+                identitySet.from_number = { $ifNull: ["$from_number", String(options.fromPhone)] };
             }
         } else {
             const outboundLeadId = docFilter.lead_id;
