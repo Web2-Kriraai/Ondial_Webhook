@@ -1,0 +1,231 @@
+{
+  "appointment_reminders": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "appointment_reminders",
+    "reason_for_calling": "Confirm dental appointment.",
+    "conversation_text": "Agent: Hi Dr. Anil's clinic here, calling to confirm your appointment at 4 PM today. User: Yes, I will be there. Agent: Great, see you then.",
+    "classifications": {
+      "items": [
+        { "name": "Confirmed", "description": "Client confirmed attendance." },
+        { "name": "Rescheduled", "description": "Client requested reschedule." }
+      ]
+    },
+    "custom_question": [],
+    "appointment_reminders": {
+      "allow_reschedule": true,
+      "cancellation_policy": {
+        "enabled": true,
+        "text": "No-show fee of ₹300 applies if cancelled within 2 hours of appointment."
+      }
+    },
+    "current_time_ist": "2026-06-22T16:25:00+05:30",
+    "payload_generated_at": "2026-06-22T16:25:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Vijay Prasad",
+      "contact_mobile": "9876543230"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "order_delivery_updates": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "order_delivery_updates",
+    "reason_for_calling": "Notify user that order is out for delivery.",
+    "conversation_text": "Agent: Hi Kiran, your package from Amazon is out for delivery today. Will you be home? User: No, please leave it with security. Agent: Understood, I have updated the driver. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Leave with security", "description": "Delivery instructions updated." },
+        { "name": "Deliver tomorrow", "description": "Customer requested delay." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Where to leave the package?", "instructions": "Extract delivery instructions." }
+    ],
+    "current_time_ist": "2026-06-22T16:30:00+05:30",
+    "payload_generated_at": "2026-06-22T16:30:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Kiran Rao",
+      "contact_mobile": "9876543231"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "event_booking_confirmations": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "event_booking_confirmations",
+    "reason_for_calling": "Confirm webinar attendance.",
+    "conversation_text": "Agent: Hi Sarah, calling to confirm your seat for the Tech Conference tomorrow at 10 AM. User: Yes, I will join online. Agent: Wonderful, see you there.",
+    "classifications": {
+      "items": [
+        { "name": "Confirmed", "description": "Confirmed joining." }
+      ]
+    },
+    "custom_question": [],
+    "event_booking": {
+      "allow_modifications": true
+    },
+    "current_time_ist": "2026-06-22T16:35:00+05:30",
+    "payload_generated_at": "2026-06-22T16:35:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Sarah Jones",
+      "contact_mobile": "9876543232",
+      "contact_email": "sarah@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "event_booking_conf",
+            "title": "Event Booking Confirmation",
+            "description": "Email with event schedule and link",
+            "subject": "Confirmed: Your Seat for Tech Conference - {{company_name:\"TechConf Org\"}}",
+            "body": "Hi {{contact_name:\"Sarah Jones\"}},\n\nYour seat for the Tech Conference has been successfully confirmed. It will start at 10 AM tomorrow. Please join using this link: https://example.com/join\n\nBest regards,\n{{agent_name:\"Sarah\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Sarah Jones",
+              "company_name": "TechConf Org",
+              "agent_name": "Sarah"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "emergency_critical_alerts": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "emergency_critical_alerts",
+    "reason_for_calling": "Alert system down or server outage.",
+    "conversation_text": "Agent: Warning! Server DB-01 CPU utilization is at 99%. User: Understood, I am restarting it now. Agent: Acknowledged.",
+    "classifications": {
+      "items": [
+        { "name": "Acknowledged", "description": "Customer acknowledged the critical alert." }
+      ]
+    },
+    "custom_question": [],
+    "emergency_alert": {
+      "aggressive_retry": true,
+      "parallel_sms": true,
+      "locked": true
+    },
+    "current_time_ist": "2026-06-22T16:40:00+05:30",
+    "payload_generated_at": "2026-06-22T16:40:00+05:30",
+    "user_contact_info": {
+      "contact_name": "DevOps OnCall",
+      "contact_mobile": "9876543233"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "policy_subscription_renewals": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "policy_subscription_renewals",
+    "reason_for_calling": "Notify about upcoming policy renewal date.",
+    "conversation_text": "Agent: Hi Dev, your car insurance policy is expiring on 30th June. User: What is the renewal premium? Agent: It is 12,500 INR. User: Please email me the payment link. Agent: Doing that right away.",
+    "classifications": {
+      "items": [
+        { "name": "Link requested", "description": "Asked for payment link." },
+        { "name": "Do not renew", "description": "Declined renewal." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T16:45:00+05:30",
+    "payload_generated_at": "2026-06-22T16:45:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Dev Kapoor",
+      "contact_mobile": "9876543234",
+      "contact_email": "dev@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "policy_renewal_link",
+            "title": "Policy Renewal Link",
+            "description": "Renewal details and link to renew policy online",
+            "subject": "Renew your Insurance Policy - {{company_name:\"SafeInsurance\"}}",
+            "body": "Hi {{contact_name:\"Dev Kapoor\"}},\n\nYour insurance policy is expiring on 30th June. The premium is 12,500 INR. Please complete the renewal here: https://example.com/renew\n\nBest regards,\n{{agent_name:\"Dev\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Dev Kapoor",
+              "company_name": "SafeInsurance",
+              "agent_name": "Dev"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "compliance_deadlines": {
+    "wizard_service_id": "notifications_alerts",
+    "sub_service_id": "compliance_deadlines",
+    "reason_for_calling": "Reminder to upload compliance documents.",
+    "conversation_text": "Agent: Hi Rohan, compliance deadline for tax filing is 31st July. User: I have already uploaded. Agent: Perfect, we will verify. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Uploaded", "description": "Documents uploaded." },
+        { "name": "Pending", "description": "Needs extension." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T16:50:00+05:30",
+    "payload_generated_at": "2026-06-22T16:50:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Rohan Jha",
+      "contact_mobile": "9876543235"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}

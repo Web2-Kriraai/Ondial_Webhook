@@ -1,0 +1,239 @@
+{
+  "cold_outreach_prospecting": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "cold_outreach_prospecting",
+    "reason_for_calling": "Introduce the product and gauge interest.",
+    "conversation_text": "Agent: Hi, am speaking with Rahul? Calling from Acme. User: Yes, Rahul here. What is this? Agent: We help teams automate inventory. Are you using spreadsheets? User: Yes, Excel mostly. Agent: We can schedule a demo? User: Sure, send details on WhatsApp.",
+    "classifications": {
+      "items": [
+        { "name": "Interested", "description": "Expressed interest and wants follow-up." },
+        { "name": "Not Interested", "description": "Declined service." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Are you using a similar service?", "instructions": "Note tool mentioned." }
+    ],
+    "current_time_ist": "2026-06-22T15:00:00+05:30",
+    "payload_generated_at": "2026-06-22T15:00:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Rahul Mehta",
+      "contact_mobile": "9876543210",
+      "contact_email": "rahul@example.com",
+      "designation": "Manager",
+      "company": "ABC retail"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": true, "type": "demo call", "booking_condition": "Requests details" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "lead_qualification": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "lead_qualification",
+    "reason_for_calling": "Qualify lead using BANT framework.",
+    "conversation_text": "Agent: Hi, Rajan here? User: Yes. Agent: We automate payroll. Do you have a budget allocated? User: Yes, around 5 lakhs. Agent: Are you the decision maker? User: Yes. Agent: Timeline? User: Still exploring.",
+    "classifications": {
+      "items": [
+        { "name": "Hot Lead", "description": "Met all criteria." },
+        { "name": "Warm Lead", "description": "Met partial criteria." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the budget?", "instructions": "Capture amount." }
+    ],
+    "current_time_ist": "2026-06-22T15:05:00+05:30",
+    "payload_generated_at": "2026-06-22T15:05:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Rajan Shah",
+      "contact_mobile": "9876543211",
+      "contact_email": "rajan@example.com",
+      "designation": "Director",
+      "company": "Rajan & Co"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "lead_qualification_followup",
+            "title": "Lead Qualification Follow-up",
+            "description": "Follow up email for qualified leads",
+            "subject": "Follow-up on Payroll Automation - {{company_name:\"Rajan & Co\"}}",
+            "body": "Hi {{contact_name:\"Rajan Shah\"}},\n\nThank you for speaking with me today. Here are the details about our payroll automation system. We would love to schedule a custom demo for {{company:\"Rajan & Co\"}}.\n\nBest regards,\n{{agent_name:\"Rajan\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Rajan Shah",
+              "company_name": "Rajan & Co",
+              "agent_name": "Rajan",
+              "company": "Rajan & Co"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "lead_qualification": {
+      "type": "new_lead",
+      "is_new_lead": true
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "appointment_demo_scheduling": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "appointment_demo_scheduling",
+    "reason_for_calling": "Schedule a product demo.",
+    "conversation_text": "Agent: Hi Amit. Priya from Acme. User: Hello. Agent: Can we schedule a demo? User: Thursday 3 PM? Agent: Perfect.",
+    "classifications": {
+      "items": [
+        { "name": "Confirmed", "description": "Demo booked." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T15:10:00+05:30",
+    "payload_generated_at": "2026-06-22T15:10:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Amit",
+      "contact_mobile": "9876543212"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": true, "type": "demo call", "booking_condition": "Agreed" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "upsell_cross_sell_campaigns": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "upsell_cross_sell_campaigns",
+    "reason_for_calling": "Pitch plan upgrades to existing users.",
+    "conversation_text": "Agent: Hi Vikram. Calling to share details about our premium tier. User: What does it offer? Agent: Unlimited calling features. User: Send details to mail.",
+    "classifications": {
+      "items": [
+        { "name": "Interested", "description": "Requested upgrade details." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T15:15:00+05:30",
+    "payload_generated_at": "2026-06-22T15:15:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Vikram",
+      "contact_mobile": "9876543213"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "upsell_premium_upgrade",
+            "title": "Premium Upgrade Info",
+            "description": "Feature details and pricing for premium tier",
+            "subject": "Unlock Unlimited Calling on {{company_name:\"Acme Corp\"}}",
+            "body": "Hi {{contact_name:\"Vikram\"}},\n\nAs requested, here is the feature list and pricing for our Premium plan. Upgrading will enable unlimited calling features immediately.\n\nBest regards,\n{{agent_name:\"Priya\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Vikram",
+              "company_name": "Acme Corp",
+              "agent_name": "Priya"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "win_back_campaigns": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "win_back_campaigns",
+    "reason_for_calling": "Re-engage churned customers.",
+    "conversation_text": "Agent: Hi Neha. प्रिया here. We miss you. User: It was too expensive. Agent: We have a 50% discount offer. User: Let me think.",
+    "classifications": {
+      "items": [
+        { "name": "Considering", "description": "Open to returning." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Why did you stop using our product?", "instructions": "Capture reason." }
+    ],
+    "win_back_config": {
+      "offer_presented": "50% off for 3 months",
+      "offer_validity": "2026-07-31",
+      "reactivation_condition": "Agreed to return"
+    },
+    "current_time_ist": "2026-06-22T15:20:00+05:30",
+    "payload_generated_at": "2026-06-22T15:20:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Neha",
+      "contact_mobile": "9876543214"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "product_promotion_calls": {
+    "wizard_service_id": "sales",
+    "sub_service_id": "product_promotion_calls",
+    "reason_for_calling": "Inform customers about promotion.",
+    "conversation_text": "Agent: Hi Karan. Big summer sale - 50% off. User: Interesting. Agent: Code is SUMMER50. User: Send it to WhatsApp.",
+    "classifications": {
+      "items": [
+        { "name": "Interested", "description": "Wants details." }
+      ]
+    },
+    "custom_question": [],
+    "promotion_config": {
+      "promotion_name": "Summer Sale 2026",
+      "promo_code": "SUMMER50",
+      "discount_details": "50% off",
+      "offer_validity": "2026-06-30",
+      "product_name": "Plan upgrade"
+    },
+    "current_time_ist": "2026-06-22T15:25:00+05:30",
+    "payload_generated_at": "2026-06-22T15:25:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Karan",
+      "contact_mobile": "9876543215"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}

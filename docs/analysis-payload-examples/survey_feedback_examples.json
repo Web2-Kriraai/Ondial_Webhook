@@ -1,0 +1,209 @@
+{
+  "nps_csat_surveys": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "nps_csat_surveys",
+    "reason_for_calling": "Collect Net Promoter Score and Customer Satisfaction rating.",
+    "conversation_text": "Agent: Hi Priya, on a scale of 0 to 10, how likely are you to recommend us to a friend? User: I would say 9. Agent: Great! And how satisfied are you with our service? User: Very satisfied, around 5 out of 5.",
+    "classifications": {
+      "items": [
+        { "name": "Promoter", "description": "NPS score 9 or 10." },
+        { "name": "Passive", "description": "NPS score 7 or 8." },
+        { "name": "Detractor", "description": "NPS score 0 to 6." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the NPS score?", "instructions": "Extract score number." },
+      { "question": "What is the CSAT rating?", "instructions": "Extract rating scale." }
+    ],
+    "current_time_ist": "2026-06-22T16:55:00+05:30",
+    "payload_generated_at": "2026-06-22T16:55:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Priya Sharma",
+      "contact_mobile": "9876543240"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "survey_thanks",
+            "title": "Feedback Thank You",
+            "description": "Thank you email for participating in survey",
+            "subject": "Thank you for your feedback! - {{company_name:\"Priya\"}}",
+            "body": "Hi {{contact_name:\"Priya Sharma\"}},\n\nThank you for taking the time to share your feedback with us today. Your inputs help us improve our services.\n\nBest regards,\n{{agent_name:\"Ondial\"}}\n{{company_name:\"Priya\"}}",
+            "variables": {
+              "contact_name": "Priya Sharma",
+              "company_name": "Ondial",
+              "agent_name": "Priya"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "post_purchase_feedback": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "post_purchase_feedback",
+    "reason_for_calling": "Get feedback on recently purchased laptop.",
+    "conversation_text": "Agent: Hi Varun, how is your new laptop performing? User: The battery life is amazing, but the keyboard is a bit stiff. Agent: Thanks, we will report this to quality assurance.",
+    "classifications": {
+      "items": [
+        { "name": "Mixed Feedback", "description": "Positive battery, negative keyboard." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What was positive?", "instructions": "Note positive points." },
+      { "question": "What was negative?", "instructions": "Note complaints." }
+    ],
+    "current_time_ist": "2026-06-22T17:00:00+05:30",
+    "payload_generated_at": "2026-06-22T17:00:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Varun Sen",
+      "contact_mobile": "9876543241"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "market_research_surveys": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "market_research_surveys",
+    "reason_for_calling": "Gather market research data on streaming preferences.",
+    "conversation_text": "Agent: Hi Neeta, which streaming platform do you use the most? User: Netflix mostly, sometimes Prime Video. Agent: How many hours a week do you watch? User: About 10 hours. Agent: Thank you for your time.",
+    "classifications": {
+      "items": [
+        { "name": "Active Streamer", "description": "Watches > 5 hours per week." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Primary platform?", "instructions": "Platform name." }
+    ],
+    "current_time_ist": "2026-06-22T17:05:00+05:30",
+    "payload_generated_at": "2026-06-22T17:05:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Neeta Patel",
+      "contact_mobile": "9876543242"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "product_feature_feedback": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "product_feature_feedback",
+    "reason_for_calling": "Gather feedback on the new chat feature.",
+    "conversation_text": "Agent: Hi Raj, how do you like the new live chat support option? User: It's very fast, but I wish I could upload screenshots. Agent: Understood, screenshot upload is a highly requested feature. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Feature Request", "description": "User wants screenshot upload option." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the requested feature?", "instructions": "Note the feature details." }
+    ],
+    "current_time_ist": "2026-06-22T17:10:00+05:30",
+    "payload_generated_at": "2026-06-22T17:10:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Rajesh Nair",
+      "contact_mobile": "9876543243"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "brand_perception_surveys": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "brand_perception_surveys",
+    "reason_for_calling": "Understand customer trust and perception of the brand.",
+    "conversation_text": "Agent: Hi Kavita, when you think of our brand, what is the first word that comes to mind? User: Reliable. I've used your products for 5 years. Agent: That's wonderful to hear. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Positive Perception", "description": "Associated with reliability." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What word is associated?", "instructions": "First word mentioned." }
+    ],
+    "current_time_ist": "2026-06-22T17:15:00+05:30",
+    "payload_generated_at": "2026-06-22T17:15:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Kavita Rao",
+      "contact_mobile": "9876543244"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "healthcare_patient_feedback": {
+    "wizard_service_id": "survey_feedback",
+    "sub_service_id": "healthcare_patient_feedback",
+    "reason_for_calling": "Collect feedback about recent clinic visit.",
+    "conversation_text": "Agent: Hi Dev, how was your consultation with Dr. Mehta yesterday? User: The doctor was great and explained everything well, but the wait time at reception was almost 30 minutes. Agent: We apologize for the wait. We'll share this with the clinic management.",
+    "classifications": {
+      "items": [
+        { "name": "Satisfied with Doctor", "description": "Good clinical experience." },
+        { "name": "Dissatisfied with Wait Time", "description": "Reception delay." }
+      ]
+    },
+    "custom_question": [
+      { "question": "How long was the wait time?", "instructions": "Extract duration." }
+    ],
+    "current_time_ist": "2026-06-22T17:20:00+05:30",
+    "payload_generated_at": "2026-06-22T17:20:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Devanand",
+      "contact_mobile": "9876543245"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}

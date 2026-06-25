@@ -1,0 +1,219 @@
+{
+  "candidate_screening": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "candidate_screening",
+    "reason_for_calling": "Screen candidate for Node.js developer role.",
+    "conversation_text": "Agent: Hi Abhishek, calling regarding your application for Node.js Developer. Do you have experience with Microservices? User: Yes, I have worked on Express and Docker for 3 years. Agent: What is your notice period? User: Immediate. Agent: Perfect, we will schedule the technical round.",
+    "classifications": {
+      "items": [
+        { "name": "Shortlisted", "description": "Candidate matches requirements." },
+        { "name": "Rejected", "description": "Incompatible skills or notice period." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the notice period?", "instructions": "Extract notice period duration." },
+      { "question": "Years of experience?", "instructions": "Extract experience in years." }
+    ],
+    "current_time_ist": "2026-06-22T17:50:00+05:30",
+    "payload_generated_at": "2026-06-22T17:50:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Abhishek Singh",
+      "contact_mobile": "9876543260",
+      "contact_email": "abhishek@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": true, "type": "interview", "booking_condition": "Shortlisted" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "candidate_shortlist",
+            "title": "Interview Invitation",
+            "description": "Email to schedule technical interview round",
+            "subject": "Interview Invitation - {{company_name:\"Ondial Tech\"}} Node.js Developer Role",
+            "body": "Hi {{contact_name:\"Abhishek Singh\"}},\n\nCongratulations! You have been shortlisted for the next round of interviews for the Node.js Developer role at {{company_name:\"Ondial Tech\"}}. Please use this calendar link to choose a slot: https://example.com/calendar\n\nBest regards,\n{{agent_name:\"Abhishek\"}}\n{{company_name:\"Ondial Tech\"}}",
+            "variables": {
+              "contact_name": "Abhishek Singh",
+              "company_name": "Ondial Tech",
+              "agent_name": "Abhishek"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "interview_scheduling_follow_up": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "interview_scheduling_follow_up",
+    "reason_for_calling": "Follow up on scheduled interview status.",
+    "conversation_text": "Agent: Hi Ritu, confirming your interview tomorrow at 11 AM with the Engineering Lead. User: Yes, I have received the invite and will join. Agent: Great, best of luck.",
+    "classifications": {
+      "items": [
+        { "name": "Confirmed", "description": "Candidate confirmed attendance." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T17:55:00+05:30",
+    "payload_generated_at": "2026-06-22T17:55:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Ritu Verma",
+      "contact_mobile": "9876543261"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "offer_rollout_follow_up": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "offer_rollout_follow_up",
+    "reason_for_calling": "Follow up on offer letter acceptance.",
+    "conversation_text": "Agent: Hi Vicky, did you review the offer letter we sent yesterday? User: Yes, I am happy with the terms. I will sign and send it by today evening. Agent: Excellent, looking forward to you joining us on 1st July.",
+    "classifications": {
+      "items": [
+        { "name": "Accepted", "description": "Candidate agreed to sign offer." },
+        { "name": "Negotiating", "description": "Candidate requested changes to terms." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Joining date confirmed?", "instructions": "Extract date." }
+    ],
+    "current_time_ist": "2026-06-22T18:00:00+05:30",
+    "payload_generated_at": "2026-06-22T18:00:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Vicky Kaushal",
+      "contact_mobile": "9876543262",
+      "contact_email": "vicky@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "offer_followup",
+            "title": "Offer Letter Follow-up",
+            "description": "Follow-up on offer status and next steps",
+            "subject": "Follow-up: Job Offer from {{company_name:\"Ondial HR\"}}",
+            "body": "Hi {{contact_name:\"Vicky Kaushal\"}},\n\nThank you for speaking with us. As agreed, please review and return the signed offer letter by this evening. We are excited for you to join us on 1st July!\n\nBest regards,\n{{agent_name:\"Vicky\"}}\n{{company_name:\"Ondial HR\"}}",
+            "variables": {
+              "contact_name": "Vicky Kaushal",
+              "company_name": "Ondial HR",
+              "agent_name": "Vicky"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "employee_satisfaction_surveys": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "employee_satisfaction_surveys",
+    "reason_for_calling": "Collect feedback on new work-from-home policy.",
+    "conversation_text": "Agent: Hi John, how is the hybrid working policy working out for you? User: It's good, saves a lot of commute time. But collaboration is slightly harder. Agent: Thank you for your feedback.",
+    "classifications": {
+      "items": [
+        { "name": "Positive feedback", "description": "Appreciates reduced commute." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T18:05:00+05:30",
+    "payload_generated_at": "2026-06-22T18:05:00+05:30",
+    "user_contact_info": {
+      "contact_name": "John Doe",
+      "contact_mobile": "9876543263"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "exit_interviews": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "exit_interviews",
+    "reason_for_calling": "Conduct exit survey to understand reasons for leaving.",
+    "conversation_text": "Agent: Hi Simran, as part of your exit process, what is the main reason for your resignation? User: I got an opportunity closer to my hometown. Agent: I see. How would you rate your experience with us? User: It was good, very supportive team.",
+    "classifications": {
+      "items": [
+        { "name": "Better Opportunity", "description": "Left for a job closer to hometown." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Reason for leaving?", "instructions": "Extract reason." }
+    ],
+    "current_time_ist": "2026-06-22T18:10:00+05:30",
+    "payload_generated_at": "2026-06-22T18:10:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Simran Kaur",
+      "contact_mobile": "9876543264"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "hr_policy_compliance_updates": {
+    "wizard_service_id": "hr_recruitment",
+    "sub_service_id": "hr_policy_compliance_updates",
+    "reason_for_calling": "Reminder to sign the annual code of conduct document.",
+    "conversation_text": "Agent: Hi Tina, this is a reminder to sign the Code of Conduct document on the HR portal by Friday. User: Oh, I forgot. I will do it right now. Agent: Thank you, appreciate it.",
+    "classifications": {
+      "items": [
+        { "name": "Acknowledged", "description": "Will sign immediately." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T18:15:00+05:30",
+    "payload_generated_at": "2026-06-22T18:15:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Tina Dsouza",
+      "contact_mobile": "9876543265"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}

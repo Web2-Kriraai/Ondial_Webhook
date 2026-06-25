@@ -1,0 +1,186 @@
+{
+  "re_engagement_campaigns": {
+    "wizard_service_id": "customer_retention",
+    "sub_service_id": "re_engagement_campaigns",
+    "reason_for_calling": "Re-engage customers who haven't logged in for 3 months.",
+    "conversation_text": "Agent: Hi Suresh, we noticed you haven't used your Acme account recently. User: Yes, we changed our workflow. Agent: We have added a new integration with Google Drive. Would you like a quick demo? User: Oh, Google Drive integration is very useful. Yes, let's schedule a call next Tuesday.",
+    "classifications": {
+      "items": [
+        { "name": "Interested", "description": "Scheduled a demo to see new features." },
+        { "name": "Not Interested", "description": "No longer needs the product." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Why did they stop using it?", "instructions": "Capture workflow reason." }
+    ],
+    "current_time_ist": "2026-06-22T17:25:00+05:30",
+    "payload_generated_at": "2026-06-22T17:25:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Suresh Raina",
+      "contact_mobile": "9876543250"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": true, "type": "demo call", "booking_condition": "Requests call" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "loyalty_rewards_activation": {
+    "wizard_service_id": "customer_retention",
+    "sub_service_id": "loyalty_rewards_activation",
+    "reason_for_calling": "Help customer activate their loyalty points.",
+    "conversation_text": "Agent: Hi Kavya, you have 5000 loyalty points expiring next week. User: Oh, how do I redeem them? Agent: I can send a link to activate them. User: Yes, please send the link to my email. Agent: Sure, sent.",
+    "classifications": {
+      "items": [
+        { "name": "Activated", "description": "Requested loyalty redemption link." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T17:30:00+05:30",
+    "payload_generated_at": "2026-06-22T17:30:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Kavya Menon",
+      "contact_mobile": "9876543251",
+      "contact_email": "kavya@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "loyalty_activation",
+            "title": "Loyalty Points Activation",
+            "description": "Email to activate loyalty points",
+            "subject": "Activate your {{company_name:\"LoyaltyClub\"}} Loyalty Points!",
+            "body": "Hi {{contact_name:\"Kavya Menon\"}},\n\nAs discussed, you have 5000 loyalty points expiring next week. Please click this link to redeem or activate them: https://example.com/redeem-points\n\nBest regards,\n{{agent_name:\"Kavya\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Kavya Menon",
+              "company_name": "LoyaltyClub",
+              "agent_name": "Kavya"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "churn_prevention_calls": {
+    "wizard_service_id": "customer_retention",
+    "sub_service_id": "churn_prevention_calls",
+    "reason_for_calling": "Call customer who clicked 'cancel subscription'.",
+    "conversation_text": "Agent: Hi Alok, we saw you requested to cancel your subscription. Is there anything we could do? User: The premium plan is too expensive for a single user. Agent: We have a new 'Solo Starter' plan for half the price. User: Really? Can you switch me to that plan? Agent: Yes, I will update your plan now.",
+    "classifications": {
+      "items": [
+        { "name": "Retained", "description": "Switched to a cheaper plan." },
+        { "name": "Churned", "description": "Confirmed cancellation." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Why did they want to cancel?", "instructions": "Note the main reason." }
+    ],
+    "current_time_ist": "2026-06-22T17:35:00+05:30",
+    "payload_generated_at": "2026-06-22T17:35:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Alok Nath",
+      "contact_mobile": "9876543252"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "customer_satisfaction_check_in": {
+    "wizard_service_id": "customer_retention",
+    "sub_service_id": "customer_satisfaction_check_in",
+    "reason_for_calling": "Routine check-in to ensure satisfaction.",
+    "conversation_text": "Agent: Hi Sneha, just calling to check if you are enjoying our service. User: Yes, everything is working perfectly. The support team has been very helpful. Agent: Glad to hear! Let us know if you need anything. Have a great day.",
+    "classifications": {
+      "items": [
+        { "name": "Highly Satisfied", "description": "Positive feedback with no issues." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T17:40:00+05:30",
+    "payload_generated_at": "2026-06-22T17:40:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Sneha Reddy",
+      "contact_mobile": "9876543253"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "subscription_renewal_push": {
+    "wizard_service_id": "customer_retention",
+    "sub_service_id": "subscription_renewal_push",
+    "reason_for_calling": "Push for subscription renewal before expiry.",
+    "conversation_text": "Agent: Hi Jack, your annual subscription is expiring in 3 days. User: Yes, I want to renew, but can I pay monthly this time? Agent: Yes, you can change the billing frequency to monthly on the renewal page. User: Great, I will renew it tonight.",
+    "classifications": {
+      "items": [
+        { "name": "Intends to renew", "description": "Customer confirmed they will renew." }
+      ]
+    },
+    "custom_question": [],
+    "current_time_ist": "2026-06-22T17:45:00+05:30",
+    "payload_generated_at": "2026-06-22T17:45:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Jack Sparrow",
+      "contact_mobile": "9876543254"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "sub_renewal_link",
+            "title": "Subscription Renewal Link",
+            "description": "Renewal page details and instructions",
+            "subject": "Action Required: Renew your {{company_name:\"Ondial\"}} Subscription",
+            "body": "Hi {{contact_name:\"Jack Sparrow\"}},\n\nYour annual subscription is expiring in 3 days. As requested, you can switch to the monthly billing frequency when renewing here: https://example.com/billing\n\nBest regards,\n{{agent_name:\"Jack\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Jack Sparrow",
+              "company_name": "Ondial",
+              "agent_name": "Jack"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}

@@ -1,0 +1,201 @@
+{
+  "loan_origination": {
+    "wizard_service_id": "finance",
+    "sub_service_id": "loan_origination",
+    "reason_for_calling": "Process loan application interest and collect basic requirements.",
+    "conversation_text": "Agent: Hello, am I speaking with Suresh? User: Yes, Suresh speaking. Agent: I see you expressed interest in our home loan scheme. User: Yes, I am planning to buy a flat in Noida. Agent: What is the loan amount you are looking for? User: Around 50 lakhs. Agent: What is your monthly income? User: 1.2 lakhs per month. Agent: Great, I will forward this to our executive. Can we email you details? User: Yes, suresh@example.com.",
+    "classifications": {
+      "items": [
+        { "name": "Eligible Lead", "description": "Meets salary and loan amount ratio." },
+        { "name": "Ineligible Lead", "description": "Does not meet criteria." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the monthly income?", "instructions": "Extract monthly income amount." },
+      { "question": "What is the desired loan amount?", "instructions": "Extract loan amount." }
+    ],
+    "current_time_ist": "2026-06-22T16:00:00+05:30",
+    "payload_generated_at": "2026-06-22T16:00:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Suresh Kumar",
+      "contact_mobile": "9876543220",
+      "contact_email": "suresh@example.com",
+      "designation": "Software Engineer",
+      "company": "TechCorp"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "loan_origination_details",
+            "title": "Home Loan Details",
+            "description": "Information guide and application form link for home loans",
+            "subject": "Your Home Loan Inquiry - {{company_name:\"Star Finance\"}}",
+            "body": "Hi {{contact_name:\"Suresh Kumar\"}},\n\nThank you for sharing your home loan requirements with us. Here is the brochure containing current interest rates and terms. Our relationship manager will contact you soon.\n\nBest regards,\n{{agent_name:\"Suresh\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Suresh Kumar",
+              "company_name": "Star Finance",
+              "agent_name": "Suresh"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "emi_payment_reminders": {
+    "wizard_service_id": "finance",
+    "sub_service_id": "emi_payment_reminders",
+    "reason_for_calling": "Remind customer about upcoming or overdue EMI payment.",
+    "conversation_text": "Agent: Hi Rajesh, calling from Star Finance. User: Yes, tell me. Agent: This is a reminder that your car loan EMI of 15,000 INR is due on 25th June. User: Okay, I have set up auto-debit. Agent: Perfect, it will be debited automatically. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Auto-debit Active", "description": "Customer confirmed auto-debit." },
+        { "name": "Promise to Pay", "description": "Customer promised manual payment." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Did the customer confirm auto-debit?", "instructions": "Boolean yes/no." }
+    ],
+    "current_time_ist": "2026-06-22T16:05:00+05:30",
+    "payload_generated_at": "2026-06-22T16:05:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Rajesh Sharma",
+      "contact_mobile": "9876543221"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "debt_loan_recovery": {
+    "wizard_service_id": "finance",
+    "sub_service_id": "debt_loan_recovery",
+    "reason_for_calling": "Recover overdue loan amount.",
+    "conversation_text": "Agent: Hello, is this Anil? User: Yes, who is this? Agent: I am calling from recovery department regarding your personal loan. The payment is overdue by 45 days. User: I had a medical emergency, I can pay by next Friday. Agent: Okay, we will note down your promise to pay by next Friday. Please pay 20,000 INR.",
+    "classifications": {
+      "items": [
+        { "name": "Promise to Pay", "description": "Agreed to pay by a specific date." },
+        { "name": "Disputed", "description": "Customer disputes the overdue amount." },
+        { "name": "Refused to Pay", "description": "Refused payment." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the promise-to-pay date?", "instructions": "Extract date." }
+    ],
+    "current_time_ist": "2026-06-22T16:10:00+05:30",
+    "payload_generated_at": "2026-06-22T16:10:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Anil Gupta",
+      "contact_mobile": "9876543222"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": true }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "credit_card_insurance_sales": {
+    "wizard_service_id": "finance",
+    "sub_service_id": "credit_card_insurance_sales",
+    "reason_for_calling": "Offer pre-approved credit card or insurance policy.",
+    "conversation_text": "Agent: Hi Monica, calling from Prime Bank. User: Hello. Agent: You are pre-approved for our Platinum Card with zero annual fee. User: Does it have lounge access? Agent: Yes, 4 free domestic lounge visits per year. User: Sounds good, please send the application link. Agent: Sure, I will trigger the link to your phone. Thank you.",
+    "classifications": {
+      "items": [
+        { "name": "Lead Generated", "description": "Expressed interest and requested application link." },
+        { "name": "Not Interested", "description": "Declined card offer." }
+      ]
+    },
+    "custom_question": [
+      { "question": "Is the customer interested in lounge access?", "instructions": "Yes/No response." }
+    ],
+    "current_time_ist": "2026-06-22T16:15:00+05:30",
+    "payload_generated_at": "2026-06-22T16:15:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Monica Sen",
+      "contact_mobile": "9876543223",
+      "contact_email": "monica@example.com"
+    },
+    "features_enabled": {
+      "is_followup_enabled": true,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": {
+        "status": true,
+        "templates": [
+          {
+            "id": "cc_platinum_offer",
+            "title": "Platinum Credit Card Offer",
+            "description": "Application link and benefits list for Platinum credit card",
+            "subject": "Your Pre-approved Platinum Card Offer - {{company_name:\"Prime Bank\"}}",
+            "body": "Hi {{contact_name:\"Monica Sen\"}},\n\nHere is your exclusive link to apply for the pre-approved Platinum Credit Card with zero annual fee and lounge benefits: https://example.com/apply\n\nBest regards,\n{{agent_name:\"Monica\"}}\n{{company_name:\"Ondial\"}}",
+            "variables": {
+              "contact_name": "Monica Sen",
+              "company_name": "Prime Bank",
+              "agent_name": "Monica"
+            }
+          }
+        ]
+      },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  },
+  "kyc_verification_call": {
+    "wizard_service_id": "finance",
+    "sub_service_id": "kyc_verification_call",
+    "reason_for_calling": "Verify identity and address details for KYC.",
+    "conversation_text": "Agent: Hi Ramesh, calling from FinTech. We need to verify details for KYC. User: Yes. Agent: Can you confirm your date of birth? User: 15th August 1989. Agent: And your current zip code? User: 560001. Agent: Thank you, verification complete.",
+    "classifications": {
+      "items": [
+        { "name": "Verified", "description": "All details matched." },
+        { "name": "Failed", "description": "Mismatch in details." }
+      ]
+    },
+    "custom_question": [
+      { "question": "What is the date of birth?", "instructions": "Extract DOB." },
+      { "question": "What is the zip code?", "instructions": "Extract zip code." }
+    ],
+    "current_time_ist": "2026-06-22T16:20:00+05:30",
+    "payload_generated_at": "2026-06-22T16:20:00+05:30",
+    "user_contact_info": {
+      "contact_name": "Ramesh Swamy",
+      "contact_mobile": "9876543224"
+    },
+    "features_enabled": {
+      "is_followup_enabled": false,
+      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "email_followup": { "status": false, "templates": [] },
+      "callback_scheduling": { "status": false }
+    },
+    "agent": {
+      "name": "Priya",
+      "tone": "Standard",
+      "primary_language": "en-IN"
+    }
+  }
+}
