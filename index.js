@@ -22,7 +22,7 @@ const {
     upsertTwilioAnchoredCallLog,
 } = require("./callLogs");
 const logger = require("./logger");
-const callEvents = require("./events");
+const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
@@ -300,11 +300,12 @@ function buildLegacyConversationShape({ turns, transcript, startTime, endTime })
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
-    const campaignId = req.query.campaignId;
+    const campaignId = String(req.query.campaignId || "").trim();
 
     res.write(`data: ${JSON.stringify({
         type: "sse.connected",
@@ -313,21 +314,31 @@ app.get("/api/v1/sse/listen", (req, res) => {
     })}\n\n`);
 
     const onCallUpdate = (data) => {
-        if (campaignId && data.campaign_id && data.campaign_id !== campaignId) {
+        const eventCampaignId = String(
+            data?.campaign_id || data?.campaignId || data?.campaign?._id || ""
+        ).trim();
+        if (campaignId && eventCampaignId && eventCampaignId !== campaignId) {
             return;
         }
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        try {
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+        } catch {
+            // client disconnected
+        }
     };
 
-    callEvents.on("call_update", onCallUpdate);
+    const unsubscribe = subscribeCampaignDelta(onCallUpdate);
 
-    // Keep-alive ping every 30 seconds
     const pingInterval = setInterval(() => {
-        res.write(": ping\n\n");
-    }, 30000);
+        try {
+            res.write(": ping\n\n");
+        } catch {
+            // ignore
+        }
+    }, 25000);
 
     req.on("close", () => {
-        callEvents.off("call_update", onCallUpdate);
+        unsubscribe();
         clearInterval(pingInterval);
     });
 });
