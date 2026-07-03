@@ -24,7 +24,7 @@
     },
     "features_enabled": {
       "is_followup_enabled": true,
-      "demo_booking": { "status": true, "type": "demo call", "booking_condition": "Requests details" },
+      "demo_booking": { "status": true, "type": "Demo Call Appointment", "booking_condition": "When prospect agrees to a product demo" },
       "email_followup": { "status": false, "templates": [] },
       "callback_scheduling": { "status": true }
     },
@@ -59,7 +59,7 @@
     },
     "features_enabled": {
       "is_followup_enabled": true,
-      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "demo_booking": { "status": false },
       "email_followup": {
         "status": true,
         "templates": [
@@ -138,7 +138,7 @@
     },
     "features_enabled": {
       "is_followup_enabled": true,
-      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "demo_booking": { "status": false },
       "email_followup": {
         "status": true,
         "templates": [
@@ -190,7 +190,7 @@
     },
     "features_enabled": {
       "is_followup_enabled": true,
-      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "demo_booking": { "status": false },
       "email_followup": { "status": false, "templates": [] },
       "callback_scheduling": { "status": true }
     },
@@ -226,7 +226,7 @@
     },
     "features_enabled": {
       "is_followup_enabled": true,
-      "demo_booking": { "status": false, "type": "", "booking_condition": "" },
+      "demo_booking": { "status": false },
       "email_followup": { "status": false, "templates": [] },
       "callback_scheduling": { "status": false }
     },
