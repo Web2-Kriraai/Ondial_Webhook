@@ -212,6 +212,7 @@
     },
     "custom_question": [],
     "promotion_config": {
+      "status": true,
       "promotion_name": "Summer Sale 2026",
       "promo_code": "SUMMER50",
       "discount_details": "50% off",
