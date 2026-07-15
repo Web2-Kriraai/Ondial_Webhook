@@ -25,6 +25,9 @@ const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
+const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
+const { verifyAisensySignature } = require("./lib/aisensySignature");
+const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
@@ -1047,6 +1050,42 @@ app.post("/api/inbound-mapping", async (req, res) => {
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
+/**
+ * AiSensy provider ingress (canonical public URL):
+ *   Live: https://api.ondial.ai/api/webhook/aisensy
+ *   Test: https://dev-api.ondial.ai/api/webhook/aisensy
+ * Enqueues to BullMQ `aisensy-inbound` for Calling_system1; updates marketing logs async.
+ */
+app.post("/api/webhook/aisensy", async (req, res) => {
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const signature =
+        req.headers["x-aisensy-signature"] ||
+        req.headers["x-hub-signature-256"] ||
+        req.headers["x-signature"];
+    const secret = String(process.env.AISENSY_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || "").trim();
+
+    if (secret && !verifyAisensySignature(rawBody, signature, secret)) {
+        return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const payload = req.body;
+    if (!payload || typeof payload !== "object") {
+        return res.status(400).json({ error: "Invalid JSON" });
+    }
+
+    // Ack immediately — queue + marketing fan-out are async
+    res.status(200).json({ received: true });
+
+    enqueueAisensyInbound(payload, {
+        signaturePresent: Boolean(signature),
+        sourceIp: req.ip,
+    }).catch((err) => {
+        logger.error("[AiSensy] enqueue failed after ack", { error: err.message });
+    });
+
+    processAisensyMarketingWebhookSafe(payload);
+});
+
 app.get("/health", (req, res) => {
     res.json({ status: "ok", time: new Date().toISOString() });
 });
@@ -1100,6 +1139,7 @@ function setupShutdownHandlers() {
         logger.info("Shutdown signal received", { signal });
         try {
             await closeWebhookWorkers();
+            await closeAisensyInboundQueue();
         } catch (err) {
             logger.error("Error closing webhook workers", { error: err.message });
         } finally {
