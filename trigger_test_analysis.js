@@ -42,7 +42,9 @@ async function main() {
         if (finalPayload.features_enabled) {
             if (finalPayload.features_enabled.is_followup_enabled === false) {
                 delete finalPayload.features_enabled.email_followup;
+                delete finalPayload.features_enabled.whatsapp_followup;
                 delete finalPayload.features_enabled.callback_scheduling;
+                delete finalPayload.features_enabled.demo_booking;
             }
         }
         if (finalPayload.sub_service_id !== "win_back_campaigns") {
