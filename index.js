@@ -1063,8 +1063,17 @@ app.post("/api/webhook/aisensy", async (req, res) => {
         req.headers["x-hub-signature-256"] ||
         req.headers["x-signature"];
     const secret = String(process.env.AISENSY_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || "").trim();
+    const requireSecret =
+        process.env.NODE_ENV === "production" ||
+        String(process.env.AISENSY_WEBHOOK_REQUIRE_SECRET || "").toLowerCase() === "true";
 
-    if (secret && !verifyAisensySignature(rawBody, signature, secret)) {
+    if (!secret) {
+        if (requireSecret) {
+            logger.error("[AiSensy] WEBHOOK_SECRET / AISENSY_WEBHOOK_SECRET not configured");
+            return res.status(503).json({ error: "Webhook secret not configured" });
+        }
+        logger.warn("[AiSensy] webhook secret unset — signature verification skipped (dev only)");
+    } else if (!verifyAisensySignature(rawBody, signature, secret)) {
         return res.status(401).json({ error: "Invalid signature" });
     }
 
@@ -1073,15 +1082,18 @@ app.post("/api/webhook/aisensy", async (req, res) => {
         return res.status(400).json({ error: "Invalid JSON" });
     }
 
-    // Ack immediately — queue + marketing fan-out are async
-    res.status(200).json({ received: true });
+    // Enqueue before ACK so Redis failures are not silently dropped after 200
+    try {
+        await enqueueAisensyInbound(payload, {
+            signaturePresent: Boolean(signature),
+            sourceIp: req.ip,
+        });
+    } catch (err) {
+        logger.error("[AiSensy] enqueue failed", { error: err.message });
+        return res.status(503).json({ error: "Queue unavailable", detail: err.message });
+    }
 
-    enqueueAisensyInbound(payload, {
-        signaturePresent: Boolean(signature),
-        sourceIp: req.ip,
-    }).catch((err) => {
-        logger.error("[AiSensy] enqueue failed after ack", { error: err.message });
-    });
+    res.status(200).json({ received: true });
 
     processAisensyMarketingWebhookSafe(payload);
 });
