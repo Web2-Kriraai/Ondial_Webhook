@@ -2,8 +2,9 @@
  * Country-wise pricing (Layer 2) — E2E-style resolver checks for Ondial_Webhook.
  *
  * Offline (no Mongo/Redis). Mirrors Ondial's tests/country-pricing-resolver.test.mjs
- * for the CommonJS copy of the resolver, plus the outbound/inbound destination-phone
- * resolution used by app/api/webhooks/call-completed and the worker/inbound paths.
+ * for the CommonJS copy of the resolver, plus number-based billing-phone resolution
+ * (the OWNED number placing/receiving the call, not the other party) used by
+ * app/api/webhooks/call-completed and lib/campaignCreditDeduction.js.
  *
  * Run: node scripts/test-country-pricing.js
  */
@@ -20,7 +21,6 @@ const {
 const {
     countryIsoFromPhone,
     extractDestinationPhone,
-    extractCallerPhone,
     resolveCountryBillingPhone,
     resolveDefaultCountryIso,
 } = require("../lib/countryFromPhone");
@@ -74,22 +74,26 @@ check("IN/US/AU concurrentCallCost + phoneNumberCost from seed matrix", () => {
     assert.strictEqual(resolveResourceCosts({ countryIso: "AU", fallbackPhoneNumberCost: 1, fallbackConcurrentCallCost: 1 }).phoneNumberCost, 6);
 });
 
-console.log("\ncountryFromPhone — destination resolution for webhook billing (split model)");
+console.log("\ncountryFromPhone — number-based billing-phone resolution (OWNED number, not the other party)");
 check("countryIsoFromPhone resolves +91/+1/+61 correctly", () => {
     assert.strictEqual(countryIsoFromPhone("+919876543210"), "IN");
     assert.strictEqual(countryIsoFromPhone("+14155552671"), "US");
     assert.strictEqual(countryIsoFromPhone("+61255501234"), "AU");
 });
-check("extractDestinationPhone picks the callee ('to') field for outbound billing", () => {
+check("extractDestinationPhone picks the 'to' field — used as the DID for inbound, or the fallback line for outbound", () => {
     assert.strictEqual(extractDestinationPhone({ to_number: "+14155552671", from_number: "+919876543210" }), "+14155552671");
 });
-check("extractCallerPhone picks the caller ('from') field for inbound billing", () => {
-    assert.strictEqual(extractCallerPhone({ to_number: "+919876543210", from_number: "+14155552671" }), "+14155552671");
-});
-check("resolveCountryBillingPhone: outbound uses callee, inbound uses caller", () => {
+check("resolveCountryBillingPhone: outbound prefers campaign.selectedPhoneNumber (falls back to 'to'); inbound uses the DID ('to')", () => {
     const doc = { to_number: "+14155552671", from_number: "+919876543210" };
+    // Outbound: campaign's own line wins over anything on the call log doc.
+    assert.strictEqual(
+        resolveCountryBillingPhone(doc, { inbound: false, campaign: { selectedPhoneNumber: "+919000000001" } }),
+        "+919000000001"
+    );
+    // Outbound with no campaign line supplied: falls back to whatever's on the doc.
     assert.strictEqual(resolveCountryBillingPhone(doc, { inbound: false }), "+14155552671");
-    assert.strictEqual(resolveCountryBillingPhone(doc, { inbound: true }), "+919876543210");
+    // Inbound: always the DID (to_number), never the caller.
+    assert.strictEqual(resolveCountryBillingPhone(doc, { inbound: true }), "+14155552671");
 });
 check("resolveDefaultCountryIso falls back to campaign.companyCountryIso, then infers from DID for inbound", () => {
     const campaign = { companyCountryIso: "US" };
@@ -98,30 +102,32 @@ check("resolveDefaultCountryIso falls back to campaign.companyCountryIso, then i
     assert.strictEqual(resolveDefaultCountryIso(inboundDoc, campaign, { inbound: true }), "IN");
 });
 
-console.log("\nFull E2E scenario — IN account owning an IN + a US number, billing destination country");
-check("outbound call FROM IN number TO US contact bills at US rate (destination wins over account/number)", () => {
-    const callLog = { to_number: "+14155552671", from_number: "+919876543210" };
-    const destinationPhone = resolveCountryBillingPhone(callLog, { inbound: false });
-    const destinationIso = countryIsoFromPhone(destinationPhone, "IN");
-    const rate = resolvePlanRate({ countryIso: destinationIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
-    assert.strictEqual(destinationIso, "US");
+console.log("\nFull E2E scenario — IN account, campaign uses a +1 Twilio number to call a +91 contact (number wins, not destination)");
+check("outbound call placed FROM the +1 campaign number TO a +91 contact bills at the US rate (number wins)", () => {
+    const callLog = { to_number: "+919876543210", from_number: "+14155552671" };
+    const campaign = { selectedPhoneNumber: "+14155552671" };
+    const billingPhone = resolveCountryBillingPhone(callLog, { inbound: false, campaign });
+    const billingIso = countryIsoFromPhone(billingPhone, "IN");
+    const rate = resolvePlanRate({ countryIso: billingIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
+    assert.strictEqual(billingIso, "US");
     assert.strictEqual(rate.ratePerMinute, 0.065);
 });
-check("outbound call FROM US number TO IN contact bills at IN rate (destination wins)", () => {
-    const callLog = { to_number: "+919876543210", from_number: "+14155552671" };
-    const destinationPhone = resolveCountryBillingPhone(callLog, { inbound: false });
-    const destinationIso = countryIsoFromPhone(destinationPhone, "US");
-    const rate = resolvePlanRate({ countryIso: destinationIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
-    assert.strictEqual(destinationIso, "IN");
+check("outbound call placed FROM the +91 campaign number TO a +1 contact bills at the IN rate (number wins)", () => {
+    const callLog = { to_number: "+14155552671", from_number: "+919876543210" };
+    const campaign = { selectedPhoneNumber: "+919876543210" };
+    const billingPhone = resolveCountryBillingPhone(callLog, { inbound: false, campaign });
+    const billingIso = countryIsoFromPhone(billingPhone, "US");
+    const rate = resolvePlanRate({ countryIso: billingIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
+    assert.strictEqual(billingIso, "IN");
     assert.strictEqual(rate.ratePerMinute, 0.055);
 });
-check("inbound call TO the US DID FROM an IN caller bills at IN rate (caller is the destination for inbound)", () => {
+check("inbound call TO the +1 US DID FROM an IN caller bills at the US rate (DID wins, not the caller)", () => {
     const callLog = { to_number: "+14155552671", from_number: "+919876543210" };
-    const destinationPhone = resolveCountryBillingPhone(callLog, { inbound: true });
-    const destinationIso = countryIsoFromPhone(destinationPhone, "US");
-    const rate = resolvePlanRate({ countryIso: destinationIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
-    assert.strictEqual(destinationIso, "IN");
-    assert.strictEqual(rate.ratePerMinute, 0.055);
+    const billingPhone = resolveCountryBillingPhone(callLog, { inbound: true });
+    const billingIso = countryIsoFromPhone(billingPhone, "IN");
+    const rate = resolvePlanRate({ countryIso: billingIso, packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 });
+    assert.strictEqual(billingIso, "US");
+    assert.strictEqual(rate.ratePerMinute, 0.065);
 });
 
 console.log(`\n${passed} check(s) passed.`);
