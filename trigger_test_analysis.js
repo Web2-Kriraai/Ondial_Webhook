@@ -1,7 +1,7 @@
 // Set up environments before requiring db and triggerCallAnalysis
 process.env.MONGODB_URI = "mongodb://ondial__db:nf5IdE3JP63tXBFZ@ac-nlfhhjp-shard-00-00.ak2rgbl.mongodb.net:27017,ac-nlfhhjp-shard-00-01.ak2rgbl.mongodb.net:27017,ac-nlfhhjp-shard-00-02.ak2rgbl.mongodb.net:27017/ondial_test?ssl=true&replicaSet=atlas-16ketm-shard-0&authSource=admin&appName=ondial";
 process.env.REDIS_URL = "redis://127.0.0.1:6379";
-process.env.ANALYSIS_API_URL = "https://sscript.ondial.ai";
+process.env.ANALYSIS_API_URL = "https://sforeignscript.ondial.ai";
 process.env.ANALYSIS_USE_BODY_PAYLOAD = "1";
 process.env.ONDIAL_TRIGGER_ANALYSIS_ENABLED = "1";
 process.env.ONDIAL_SKIP_CREDIT_TEST_CALLS = "0";
