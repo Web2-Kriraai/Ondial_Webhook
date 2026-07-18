@@ -39,9 +39,18 @@ function check(name, fn) {
 }
 
 console.log("Country pricing (CommonJS) — resolver shape");
-check("DEFAULT_COUNTRY_PRICING seeds IN/US/AU with enabled:true", () => {
+check("DEFAULT_COUNTRY_PRICING seeds Twilio markets + IN with enabled:true", () => {
     assert.strictEqual(DEFAULT_COUNTRY_PRICING.enabled, true);
-    assert.deepStrictEqual(Object.keys(DEFAULT_COUNTRY_PRICING.countries).sort(), ["AU", "IN", "US"]);
+    assert.deepStrictEqual(Object.keys(DEFAULT_COUNTRY_PRICING.countries).sort(), [
+        "AU",
+        "CA",
+        "DE",
+        "FR",
+        "GB",
+        "IN",
+        "MY",
+        "US",
+    ]);
 });
 check("PACKAGE_IDS / VOICE_TIERS match Ondial + Super-Admin", () => {
     assert.deepStrictEqual(PACKAGE_IDS, ["starter", "professional", "enterprise", "premium"]);
@@ -54,8 +63,8 @@ check("IN/US/AU starter-standard match the user's worked examples", () => {
     assert.strictEqual(resolvePlanRate({ countryIso: "US", packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 }).ratePerMinute, 0.065);
     assert.strictEqual(resolvePlanRate({ countryIso: "AU", packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 999 }).ratePerMinute, 0.045);
 });
-check("unlisted country (GB) falls back to US per fallbackOrder", () => {
-    const r = resolvePlanRate({ countryIso: "GB", packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 0.5 });
+check("unlisted country (JP) falls back to US per fallbackOrder", () => {
+    const r = resolvePlanRate({ countryIso: "JP", packageId: "starter", voiceTier: "standard", fallbackRatePerMinute: 0.5 });
     assert.strictEqual(r.source, "fallback");
     assert.strictEqual(r.countryIso, "US");
     assert.strictEqual(r.ratePerMinute, 0.065);
