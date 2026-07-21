@@ -81,6 +81,68 @@ check("IN/US/AU concurrentCallCost + phoneNumberCost from seed matrix", () => {
     assert.strictEqual(resolveResourceCosts({ countryIso: "IN", fallbackPhoneNumberCost: 1, fallbackConcurrentCallCost: 1 }).phoneNumberCost, 4.9);
     assert.strictEqual(resolveResourceCosts({ countryIso: "US", fallbackPhoneNumberCost: 1, fallbackConcurrentCallCost: 1 }).phoneNumberCost, 7);
     assert.strictEqual(resolveResourceCosts({ countryIso: "AU", fallbackPhoneNumberCost: 1, fallbackConcurrentCallCost: 1 }).phoneNumberCost, 6);
+    assert.strictEqual(resolveResourceCosts({ countryIso: "US", fallbackPhoneNumberCost: 1, fallbackConcurrentCallCost: 1 }).provider, null);
+});
+check("providers.twilio override wins; pool inherits country; garbage stays crash-safe", () => {
+    const config = normalizeCountryPricingConfig({
+        countries: {
+            US: {
+                phoneNumberCost: 7,
+                concurrentCallCost: 7,
+                providers: { twilio: { phoneNumberCost: 9.5, concurrentCallCost: 8 }, nope: { phoneNumberCost: 99 } },
+            },
+        },
+    });
+    const twilio = resolveResourceCosts({
+        config,
+        countryIso: "US",
+        provider: "twilio",
+        fallbackPhoneNumberCost: 1,
+        fallbackConcurrentCallCost: 1,
+    });
+    assert.strictEqual(twilio.source, "provider");
+    assert.strictEqual(twilio.phoneNumberCost, 9.5);
+    assert.strictEqual(twilio.concurrentCallCost, 8);
+
+    const pool = resolveResourceCosts({
+        config,
+        countryIso: "US",
+        provider: "pool",
+        fallbackPhoneNumberCost: 1,
+        fallbackConcurrentCallCost: 1,
+    });
+    assert.strictEqual(pool.source, "country");
+    assert.strictEqual(pool.phoneNumberCost, 7);
+
+    const unknown = resolveResourceCosts({
+        config,
+        countryIso: "US",
+        provider: "unknown-vendor",
+        fallbackPhoneNumberCost: 1,
+        fallbackConcurrentCallCost: 1,
+    });
+    assert.strictEqual(unknown.source, "country");
+    assert.strictEqual(unknown.phoneNumberCost, 7);
+});
+check("partial provider override merges concurrent from country", () => {
+    const config = normalizeCountryPricingConfig({
+        countries: {
+            US: {
+                phoneNumberCost: 7,
+                concurrentCallCost: 7,
+                providers: { twilio: { phoneNumberCost: 11 } },
+            },
+        },
+    });
+    const r = resolveResourceCosts({
+        config,
+        countryIso: "US",
+        provider: "twilio",
+        fallbackPhoneNumberCost: 1,
+        fallbackConcurrentCallCost: 1,
+    });
+    assert.strictEqual(r.phoneNumberCost, 11);
+    assert.strictEqual(r.concurrentCallCost, 7);
 });
 
 console.log("\ncountryFromPhone — number-based billing-phone resolution (OWNED number, not the other party)");
