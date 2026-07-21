@@ -30,7 +30,6 @@ WhatsApp templates resolve from `whatsapptemplates` then `platform_whatsapp_temp
       "title": "shopsphere_followup_en",
       "description": "Hi {{1}}, ... {{2}}% ...",
       "campaign_name": "shopsphere_followup_en_a440fa",
-      "variable_count": 4,
       "sample_values": {
         "{{1}}": "Rohan Patel",
         "{{2}}": "40",
@@ -43,8 +42,8 @@ WhatsApp templates resolve from `whatsapptemplates` then `platform_whatsapp_temp
 ```
 
 Notes:
-- No `body` field on WhatsApp templates (description holds template text).
-- `sample_values` / `variable_count` help the analysis API fill `whatsapp_draft.template_params`.
+- No `body` or `variable_count` on WhatsApp templates (API rejects extra fields).
+- `sample_values` helps the analysis API fill `whatsapp_draft.template_params`.
 
 Disabled: `{ "status": false }`
 
