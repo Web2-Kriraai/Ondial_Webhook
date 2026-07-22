@@ -292,22 +292,25 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                 return;
             }
 
-            await db.collection(collectionName).updateOne(
-                { call_id: key },
-                {
-                    $setOnInsert: {
-                        call_id: key,
-                        contact_id: String(contact_id || ""),
-                        config_id: String(campaign_id || ""),
-                        call_direction: "inbound",
-                        createdAt: new Date().toISOString(),
-                        recordingUrl: "",
-                        call_data: { events: [] },
-                        status: INBOUND_CONVERSATION_STATUS_ACTIVE,
+            try {
+                await updateOneWithUpsertRaceRetry(db.collection(collectionName), { call_id: key }, [
+                    {
+                        $set: {
+                            call_id: { $ifNull: ["$call_id", key] },
+                            contact_id: { $ifNull: ["$contact_id", String(contact_id || "")] },
+                            config_id: { $ifNull: ["$config_id", String(campaign_id || "")] },
+                            call_direction: { $ifNull: ["$call_direction", "inbound"] },
+                            createdAt: { $ifNull: ["$createdAt", new Date().toISOString()] },
+                            recordingUrl: { $ifNull: ["$recordingUrl", ""] },
+                            call_data: { $ifNull: ["$call_data", { events: [] }] },
+                            status: { $ifNull: ["$status", INBOUND_CONVERSATION_STATUS_ACTIVE] },
+                        },
                     },
-                },
-                { upsert: true }
-            );
+                    { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+                ]);
+            } catch (err) {
+                if (!isDuplicateKeyError(err)) throw err;
+            }
             logger.info(`[CallLog] Created inbound log call_id=${key} contact_id=${contact_id}`);
             return;
         }
@@ -330,26 +333,60 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
             return;
         }
 
-        await db.collection(collectionName).updateOne(
-            { lead_id: String(lead_id) },
-            {
-                $setOnInsert: {
-                    contact_id: String(contact_id || ""),
-                    campaign_id: String(campaign_id || ""),
-                    call_id: String(call_id || lead_id),
-                    lead_id: String(lead_id),
-                    createdAt: new Date().toISOString(),
-                    recordingUrl: "",
-                    call_data: { events: [] },
-                },
-            },
-            { upsert: true }
-        );
+        try {
+            await updateOneWithUpsertRaceRetry(
+                db.collection(collectionName),
+                { lead_id: String(lead_id) },
+                [
+                    {
+                        $set: {
+                            contact_id: { $ifNull: ["$contact_id", String(contact_id || "")] },
+                            campaign_id: { $ifNull: ["$campaign_id", String(campaign_id || "")] },
+                            call_id: { $ifNull: ["$call_id", String(call_id || lead_id)] },
+                            lead_id: String(lead_id),
+                            createdAt: { $ifNull: ["$createdAt", new Date().toISOString()] },
+                            recordingUrl: { $ifNull: ["$recordingUrl", ""] },
+                            call_data: { $ifNull: ["$call_data", { events: [] }] },
+                        },
+                    },
+                    { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+                ]
+            );
+        } catch (err) {
+            if (!isDuplicateKeyError(err)) throw err;
+        }
 
         logger.info(`[CallLog] Created log for lead_id=${lead_id} → contact_id=${contact_id}`);
     } catch (err) {
         logger.error(`[CallLog] createCallLog failed: ${err.message}`, { lead_id, call_id });
     }
+}
+
+function isDuplicateKeyError(err) {
+    const msg = String(err?.message || "");
+    return err?.code === 11000 || /E11000|duplicate key/i.test(msg);
+}
+
+/**
+ * Concurrent webhook upserts (e.g. call_initiated + call_ringing) can both insert when
+ * no doc exists yet. With a unique lead_id/call_id index the loser gets E11000 — retry
+ * as a normal update so both events land on the same document.
+ */
+async function updateOneWithUpsertRaceRetry(coll, filter, pipeline, { maxAttempts = 4 } = {}) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await coll.updateOne(filter, pipeline, { upsert: true });
+        } catch (err) {
+            lastErr = err;
+            if (!isDuplicateKeyError(err) || attempt === maxAttempts) throw err;
+            logger.warn("[CallLog] Upsert race (duplicate key); retrying as update", {
+                attempt,
+                filter,
+            });
+        }
+    }
+    throw lastErr;
 }
 
 /**
@@ -479,9 +516,11 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             pipeline.push({ $set: { recordingUrl } });
         }
 
-        const result = await db
-            .collection(resolvedCollectionName)
-            .updateOne(docFilter, pipeline, { upsert: true });
+        const result = await updateOneWithUpsertRaceRetry(
+            db.collection(resolvedCollectionName),
+            docFilter,
+            pipeline
+        );
 
         if (result.upsertedCount > 0) {
             logger.info(`[CallLog] Created doc and stored event '${event_type}' for ${logLabel}`);
