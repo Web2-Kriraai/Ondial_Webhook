@@ -11,6 +11,9 @@ const {
     registerTwilioCallSidMapping,
     lookupTwilioCallSidMapping,
     normalizeTwilioCallSid,
+    registerTelnyxCallControlMapping,
+    lookupTelnyxCallControlMapping,
+    normalizeTelnyxCallControlId,
 } = require("./callMapping");
 const {
     createCallLog,
@@ -20,6 +23,8 @@ const {
     buildTwilioStatusEvent,
     mergeTwilioStatusIntoCallLog,
     upsertTwilioAnchoredCallLog,
+    buildTelnyxStatusEvent,
+    upsertTelnyxAnchoredCallLog,
 } = require("./callLogs");
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
@@ -33,6 +38,8 @@ const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { pickNonEmpty } = require("./lib/customParameters");
 const { maybeDeductTwilioCallCredits } = require("./lib/twilioCallBilling");
+const { maybeDeductTelnyxCallCredits } = require("./lib/telnyxCallBilling");
+const { hangupCallControl, isTelnyxConfigured } = require("./lib/telnyxClient");
 const {
     mapTwilioCallStatusToReceiveStatus,
     resolveTwilioContactId,
@@ -702,6 +709,221 @@ app.post("/twilio/call-status", async (req, res) => {
         credit: creditResult,
         contactSync: contactSyncResult,
     });
+});
+
+// ─── Telnyx Call Control ID Mapping ───────────────────────────────────────────
+app.post("/api/telnyx-mapping", async (req, res) => {
+    const body = req.body || {};
+    const sid = normalizeTelnyxCallControlId(
+        body.call_control_id || body.telnyx_call_control_id || body.callControlId
+    );
+    if (!sid) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_required_fields",
+            missing: ["call_control_id"],
+        });
+    }
+
+    const { call_id, lead_id, campaign_id, contact_id } = body;
+    try {
+        await registerTelnyxCallControlMapping({
+            call_control_id: sid,
+            call_id: call_id || sid,
+            lead_id: lead_id || sid,
+            campaign_id,
+            contact_id,
+            collectionName: body.collectionName,
+            is_test_call: body.is_test_call === true || body.isTestCall === true,
+        });
+
+        const collectionName = resolveOutboundCollection({
+            isTestCall: body.is_test_call === true || body.isTestCall === true,
+            collectionName: body.collectionName,
+        });
+        const eventDoc = buildTelnyxStatusEvent({
+            callControlId: sid,
+            eventType: "mapped",
+            hangupCause: null,
+            durationSec: null,
+            timestampIso: new Date().toISOString(),
+        });
+        await upsertTelnyxAnchoredCallLog({
+            collectionName,
+            callControlId: sid,
+            telnyxSetFields: {
+                "telnyx.call_control_id": sid,
+                "telnyx.status": "mapped",
+                "telnyx.updatedAt": new Date().toISOString(),
+            },
+            eventDoc,
+            rootFromMapping: {
+                campaign_id,
+                contact_id,
+                lead_id: lead_id || sid,
+                call_id: call_id || sid,
+            },
+        });
+
+        return res.status(200).json({ received: true, call_control_id: sid });
+    } catch (err) {
+        logger.error("[TelnyxMapping] Failed to store mapping", {
+            error: err.message,
+            call_control_id: sid,
+        });
+        return res.status(500).json({ received: false, error: err.message });
+    }
+});
+
+/**
+ * Duration seconds from Telnyx hangup payload start/end times.
+ */
+function durationSecFromTelnyxPayload(payload) {
+    const start = payload?.start_time || payload?.startTime;
+    const end = payload?.end_time || payload?.endTime;
+    if (start && end) {
+        const a = new Date(start).getTime();
+        const b = new Date(end).getTime();
+        if (Number.isFinite(a) && Number.isFinite(b) && b >= a) {
+            return Math.max(0, Math.floor((b - a) / 1000));
+        }
+    }
+    const explicit = Number(payload?.duration_secs ?? payload?.CallDuration ?? payload?.duration);
+    if (Number.isFinite(explicit) && explicit >= 0) return Math.floor(explicit);
+    return null;
+}
+
+// ─── Telnyx Call Control webhooks (Mission Control webhook URL) ───────────────
+// Expects Telnyx envelope: { data: { event_type, payload: { call_control_id, ... } } }
+app.post("/telnyx/webhooks", async (req, res) => {
+    const body = req.body || {};
+    const envelope = body.data && typeof body.data === "object" ? body.data : body;
+    const eventType = String(envelope.event_type || envelope.eventType || body.event_type || "").trim();
+    const payload =
+        envelope.payload && typeof envelope.payload === "object"
+            ? envelope.payload
+            : envelope;
+    const callControlId = normalizeTelnyxCallControlId(
+        payload.call_control_id ||
+            payload.callControlId ||
+            envelope.call_control_id ||
+            body.call_control_id
+    );
+
+    logger.info("[Telnyx] Webhook received", {
+        event_type: eventType || null,
+        call_control_id: callControlId || null,
+    });
+
+    if (!callControlId) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_call_control_id",
+        });
+    }
+
+    const telnyxMapping = await lookupTelnyxCallControlMapping(callControlId);
+    const timestampIso = (() => {
+        const raw = envelope.occurred_at || payload.end_time || payload.start_time || Date.now();
+        const d = new Date(raw);
+        return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+    })();
+
+    const duration = durationSecFromTelnyxPayload(payload);
+    const hangupCause = payload.hangup_cause || payload.hangupCause || null;
+    const status =
+        eventType === "call.hangup"
+            ? "completed"
+            : eventType === "call.answered"
+              ? "in-progress"
+              : eventType || "unknown";
+
+    const telnyxSetFields = {
+        "telnyx.call_control_id": callControlId,
+        "telnyx.status": status,
+        "telnyx.event_type": eventType || null,
+        "telnyx.timestamp": timestampIso,
+        "telnyx.updatedAt": new Date().toISOString(),
+    };
+    if (duration != null) telnyxSetFields["telnyx.duration"] = duration;
+    if (hangupCause) telnyxSetFields["telnyx.hangup_cause"] = hangupCause;
+    if (status === "completed") telnyxSetFields["telnyx.completedAt"] = timestampIso;
+    if (inferIsTestCallFromWebhookBody(body) || telnyxMapping?.is_test_call === true) {
+        telnyxSetFields.isTestCall = true;
+    }
+
+    const eventDoc = buildTelnyxStatusEvent({
+        callControlId,
+        eventType: eventType || status,
+        hangupCause,
+        durationSec: duration,
+        timestampIso,
+    });
+
+    const collectionName = resolveOutboundCollection({
+        isTestCall: telnyxSetFields.isTestCall === true,
+        collectionName: telnyxMapping?.collectionName,
+    });
+
+    await upsertTelnyxAnchoredCallLog({
+        collectionName,
+        callControlId,
+        telnyxSetFields,
+        eventDoc,
+        rootFromMapping: {
+            campaign_id: telnyxMapping?.campaign_id || body.campaign_id,
+            contact_id: telnyxMapping?.contact_id || body.contact_id,
+            lead_id: telnyxMapping?.lead_id || callControlId,
+            call_id: telnyxMapping?.call_id || callControlId,
+        },
+    });
+
+    let creditResult = { outcome: "skipped_not_hangup" };
+    if (eventType === "call.hangup" || status === "completed") {
+        creditResult = await maybeDeductTelnyxCallCredits({
+            callControlId,
+            durationSec: duration || 0,
+            telnyxMapping,
+            body: { ...body, ...payload },
+            collectionName,
+        });
+    }
+
+    emitCallUpdateSse({
+        call_id: callControlId,
+        contact_id: telnyxMapping?.contact_id || null,
+        status: status === "completed" ? 3 : status === "in-progress" ? 2 : 1,
+        event: eventType || `telnyx_${status}`,
+        provider: "telnyx",
+    });
+
+    return res.status(200).json({
+        received: true,
+        updated: true,
+        event_type: eventType || null,
+        credit: creditResult,
+    });
+});
+
+/** Force hangup a Telnyx Call Control leg. */
+app.post("/telnyx/hangup", async (req, res) => {
+    if (!isTelnyxConfigured()) {
+        return res.status(503).json({ error: "Telnyx is not configured (TELNYX_API_KEY)" });
+    }
+    const body = req.body || {};
+    const callControlId = normalizeTelnyxCallControlId(
+        body.call_control_id || body.callControlId
+    );
+    if (!callControlId) {
+        return res.status(400).json({ error: "call_control_id is required" });
+    }
+    try {
+        await hangupCallControl(callControlId);
+        return res.status(200).json({ success: true, call_control_id: callControlId });
+    } catch (err) {
+        logger.error("[Telnyx] Hangup failed", { error: err.message, call_control_id: callControlId });
+        return res.status(502).json({ error: err.message || "Hangup failed" });
+    }
 });
 
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────

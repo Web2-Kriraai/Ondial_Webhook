@@ -220,6 +220,61 @@ async function lookupTwilioCallSidMapping(twilioCallSid) {
     return raw ? JSON.parse(raw) : null;
 }
 
+function normalizeTelnyxCallControlId(id) {
+    if (!id) return null;
+    const s = String(id).trim();
+    return s || null;
+}
+
+/**
+ * Store mapping for Telnyx Call Control correlation:
+ * call_control_id -> { call_id, lead_id, campaign_id, contact_id }.
+ */
+async function registerTelnyxCallControlMapping({
+    call_control_id,
+    telnyx_call_control_id,
+    call_id,
+    lead_id,
+    campaign_id,
+    contact_id,
+    collectionName,
+    is_test_call,
+}) {
+    const id = normalizeTelnyxCallControlId(call_control_id || telnyx_call_control_id);
+    if (!id) {
+        logger.warn("[CallMapping] Invalid call_control_id, cannot store mapping");
+        return;
+    }
+
+    const entry = {
+        call_control_id: id,
+        telnyx_call_control_id: id,
+        call_id: String(call_id || ""),
+        lead_id: String(lead_id || ""),
+        campaign_id: String(campaign_id || ""),
+        contact_id: String(contact_id || ""),
+        collectionName: collectionName ? String(collectionName) : "",
+        is_test_call: is_test_call === true,
+        updatedAt: Date.now(),
+    };
+
+    const redis = getRedis();
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(`map:telnyx:id:${id}`, JSON.stringify(entry), "EX", ttlSec);
+    logger.info("[CallMapping] Stored Telnyx call_control_id mapping", {
+        call_control_id: id,
+        contact_id: entry.contact_id,
+    });
+}
+
+async function lookupTelnyxCallControlMapping(callControlId) {
+    const id = normalizeTelnyxCallControlId(callControlId);
+    if (!id) return null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:telnyx:id:${id}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
 module.exports = {
     registerCallMapping,
     lookupMapping,
@@ -232,4 +287,7 @@ module.exports = {
     registerTwilioCallSidMapping,
     lookupTwilioCallSidMapping,
     normalizeTwilioCallSid,
+    registerTelnyxCallControlMapping,
+    lookupTelnyxCallControlMapping,
+    normalizeTelnyxCallControlId,
 };

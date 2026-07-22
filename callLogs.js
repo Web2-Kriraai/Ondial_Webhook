@@ -119,6 +119,7 @@ async function resolveOutboundCollection() {
 }
 
 const TWILIO_STATUS_EVENT = "twilio_call_status";
+const TELNYX_STATUS_EVENT = "telnyx_call_status";
 
 function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIso }) {
     return {
@@ -128,6 +129,26 @@ function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIs
             CallSid,
             CallStatus,
             CallDuration: CallDuration == null ? null : CallDuration,
+            Timestamp: timestampIso,
+        },
+    };
+}
+
+function buildTelnyxStatusEvent({
+    callControlId,
+    eventType,
+    hangupCause,
+    durationSec,
+    timestampIso,
+}) {
+    return {
+        timestamp: new Date().toISOString(),
+        event_type: TELNYX_STATUS_EVENT,
+        data: {
+            call_control_id: callControlId,
+            event_type: eventType,
+            hangup_cause: hangupCause || null,
+            CallDuration: durationSec == null ? null : durationSec,
             Timestamp: timestampIso,
         },
     };
@@ -156,6 +177,109 @@ async function mergeTwilioStatusIntoCallLog(collectionName, filter, twilioSetFie
     ];
     const result = await db.collection(collectionName).updateOne(filter, pipeline);
     return result.matchedCount > 0;
+}
+
+/**
+ * Applies Telnyx snapshot fields and appends one call_data event.
+ */
+async function mergeTelnyxStatusIntoCallLog(collectionName, filter, telnyxSetFields, eventDoc) {
+    const db = getDb();
+    const now = new Date();
+    const rootSet = { ...telnyxSetFields, updatedAt: now };
+    const pipeline = [
+        { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
+        { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+        { $set: { createdAt: { $ifNull: ["$createdAt", now] } } },
+        { $set: rootSet },
+        {
+            $set: {
+                "call_data.events": {
+                    $concatArrays: [{ $ifNull: ["$call_data.events", []] }, [eventDoc]],
+                },
+            },
+        },
+    ];
+    const result = await db.collection(collectionName).updateOne(filter, pipeline);
+    return result.matchedCount > 0;
+}
+
+/**
+ * One MongoDB document per Telnyx call_control_id.
+ */
+async function upsertTelnyxAnchoredCallLog({
+    collectionName,
+    callControlId,
+    telnyxSetFields,
+    eventDoc,
+    rootFromMapping,
+}) {
+    const db = getDb();
+    const filter = { "telnyx.call_control_id": callControlId };
+    const campaignId = rootFromMapping.campaign_id != null ? String(rootFromMapping.campaign_id) : "";
+    const contactId = rootFromMapping.contact_id != null ? String(rootFromMapping.contact_id) : "";
+    const externalLead = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
+    const externalCallRaw = rootFromMapping.call_id != null ? String(rootFromMapping.call_id).trim() : "";
+    const externalCall = externalCallRaw ? normalizeCallId(externalCallRaw) || externalCallRaw : "";
+
+    const syntheticLeadId = `telnyx:${callControlId}`;
+    const now = new Date();
+
+    const $set = {
+        ...telnyxSetFields,
+        "telnyx.call_control_id": callControlId,
+        lead_id: syntheticLeadId,
+        call_id: callControlId,
+        call_direction: "outbound",
+        updatedAt: now,
+    };
+    if (campaignId) $set.campaign_id = campaignId;
+    if (contactId) $set.contact_id = contactId;
+    if (externalLead) $set["telnyx.external_lead_id"] = externalLead;
+    if (externalCall) $set["telnyx.external_call_id"] = externalCall;
+
+    const $setOnInsert = {
+        createdAt: now,
+        recordingUrl: "",
+    };
+
+    try {
+        const result = await db.collection(collectionName).updateOne(
+            filter,
+            {
+                $set,
+                $setOnInsert,
+                $push: { "call_data.events": eventDoc },
+            },
+            { upsert: true }
+        );
+        return result;
+    } catch (err) {
+        // Path conflict if call_data missing on insert — retry with pipeline-style merge
+        if (String(err?.message || "").includes("conflict")) {
+            const matched = await mergeTelnyxStatusIntoCallLog(
+                collectionName,
+                filter,
+                $set,
+                eventDoc
+            );
+            if (!matched) {
+                await db.collection(collectionName).updateOne(
+                    filter,
+                    {
+                        $set: { ...$set, call_data: { events: [eventDoc] } },
+                        $setOnInsert,
+                    },
+                    { upsert: true }
+                );
+            }
+            return { upserted: true };
+        }
+        logger.error("[upsertTelnyxAnchoredCallLog] Error during upsert", {
+            error: err.message,
+            call_control_id: callControlId,
+        });
+        throw err;
+    }
 }
 
 /**
@@ -510,5 +634,9 @@ module.exports = {
     mergeTwilioStatusIntoCallLog,
     upsertTwilioAnchoredCallLog,
     TWILIO_STATUS_EVENT,
+    buildTelnyxStatusEvent,
+    mergeTelnyxStatusIntoCallLog,
+    upsertTelnyxAnchoredCallLog,
+    TELNYX_STATUS_EVENT,
     isUuidCallKey,
 };
