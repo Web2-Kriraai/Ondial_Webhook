@@ -402,15 +402,15 @@ async function processInboundHangupBilling({
     const billingCallId = anchor?.providerCallId || callId;
 
     const billing = await resolveInboundBillingContext({ anchor, toPhone });
-    let campaignIdForCredit = pickNonEmpty(
-        billing.campaignId,
-        identity.campaign_id
-        // Do NOT use anchor.campaignId — for validate docs that is inbound config_id.
-    );
     let inboundConfigIdForCredit = pickNonEmpty(
         billing.inboundConfigId,
         anchor?.doc?.config_id,
         anchor?.doc?.inboundConfigId
+    );
+    let campaignIdForCredit = pickNonEmpty(
+        billing.campaignId,
+        // Only keep payload/identity campaign when we do NOT already have an inbound bot.
+        inboundConfigIdForCredit ? null : identity.campaign_id
     );
     if (callId && anchor?.callSid) {
         anchor = await resolveInboundConversationAnchor(billingCallId, {
@@ -422,7 +422,7 @@ async function processInboundHangupBilling({
         lookupFilter = anchor?.syncFilter || anchor?.filter || lookupFilter;
     }
     const effectiveContactId = pickNonEmpty(contact_id, anchor?.contactId);
-    if (!campaignIdForCredit && effectiveContactId) {
+    if (!campaignIdForCredit && !inboundConfigIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
     }
     if (!campaignIdForCredit && !inboundConfigIdForCredit) {
@@ -455,6 +455,7 @@ async function processInboundHangupBilling({
         contactId: effectiveContactId,
         campaignId: campaignIdForCredit,
         inboundConfigId: inboundConfigIdForCredit,
+        preferInboundConfig: Boolean(inboundConfigIdForCredit),
         durationSec,
         callLogCollectionName: INBOUNDCALLLOG_COLLECTION,
         callLogLookupFilter: anchor?.syncFilter || lookupFilter,
