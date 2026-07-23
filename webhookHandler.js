@@ -402,10 +402,15 @@ async function processInboundHangupBilling({
     const billingCallId = anchor?.providerCallId || callId;
 
     const billing = await resolveInboundBillingContext({ anchor, toPhone });
+    let inboundConfigIdForCredit = pickNonEmpty(
+        billing.inboundConfigId,
+        anchor?.doc?.config_id,
+        anchor?.doc?.inboundConfigId
+    );
     let campaignIdForCredit = pickNonEmpty(
         billing.campaignId,
-        identity.campaign_id,
-        anchor?.campaignId
+        // Only keep payload/identity campaign when we do NOT already have an inbound bot.
+        inboundConfigIdForCredit ? null : identity.campaign_id
     );
     if (callId && anchor?.callSid) {
         anchor = await resolveInboundConversationAnchor(billingCallId, {
@@ -417,11 +422,11 @@ async function processInboundHangupBilling({
         lookupFilter = anchor?.syncFilter || anchor?.filter || lookupFilter;
     }
     const effectiveContactId = pickNonEmpty(contact_id, anchor?.contactId);
-    if (!campaignIdForCredit && effectiveContactId) {
+    if (!campaignIdForCredit && !inboundConfigIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
     }
-    if (!campaignIdForCredit) {
-        logger.warn("[Webhook] Inbound — skipping credit — campaign_id unresolved", {
+    if (!campaignIdForCredit && !inboundConfigIdForCredit) {
+        logger.warn("[Webhook] Inbound — skipping credit — no campaign or inbound config", {
             call_id: billingCallId,
             contact_id: effectiveContactId || null,
             call_sid: anchor?.callSid || null,
@@ -431,7 +436,7 @@ async function processInboundHangupBilling({
         return { outcome: "no_campaign_id" };
     }
 
-    if (identity.campaign_id !== campaignIdForCredit) {
+    if (campaignIdForCredit && identity.campaign_id !== campaignIdForCredit) {
         identity = { ...identity, campaign_id: campaignIdForCredit };
     }
 
@@ -449,6 +454,8 @@ async function processInboundHangupBilling({
         callUniqueId: billingCallId,
         contactId: effectiveContactId,
         campaignId: campaignIdForCredit,
+        inboundConfigId: inboundConfigIdForCredit,
+        preferInboundConfig: Boolean(inboundConfigIdForCredit),
         durationSec,
         callLogCollectionName: INBOUNDCALLLOG_COLLECTION,
         callLogLookupFilter: anchor?.syncFilter || lookupFilter,
@@ -457,7 +464,8 @@ async function processInboundHangupBilling({
     logger.info("[Webhook] Inbound credit deduction", {
         call_id: billingCallId,
         call_sid: anchor?.callSid || null,
-        campaign_id: campaignIdForCredit,
+        campaign_id: campaignIdForCredit || null,
+        inbound_config_id: inboundConfigIdForCredit || null,
         ...creditResult,
     });
 
@@ -478,6 +486,21 @@ async function processInboundHangupBilling({
         };
         await syncInboundCompletionFields(syncParams);
         scheduleDeferredInboundCompletionSync(syncParams);
+    } else if (creditResult.outcome === "campaign_not_found" || creditResult.outcome === "error") {
+        const syncParams = {
+            callSid: anchor?.callSid,
+            toPhone,
+            fromPhone,
+            providerCallId: billingCallId,
+            durationSec,
+            recordingUrl,
+            creditFields: {
+                creditsDeducted: false,
+                creditDeductionError: creditResult.error || creditResult.outcome,
+                status: "completed",
+            },
+        };
+        await syncInboundCompletionFields(syncParams);
     }
 
     return creditResult;

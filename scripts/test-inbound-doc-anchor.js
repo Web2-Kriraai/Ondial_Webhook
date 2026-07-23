@@ -6,6 +6,7 @@ const assert = require("assert");
 const {
     providerCallIdToCallSid,
     callSidToProviderCallId,
+    callSidLookupVariants,
     inboundDocFilterFor,
     isLikelyValidateUiDoc,
     pickBestInboundDoc,
@@ -22,6 +23,13 @@ function run() {
         providerCallIdToCallSid("92bd645ee9764a14969a5176d7fed547"),
         CALL_SID
     );
+
+    const fromUuid = callSidLookupVariants(PROVIDER_ID);
+    assert.ok(fromUuid.includes(PROVIDER_ID));
+    assert.ok(fromUuid.includes(CALL_SID));
+    const fromCallSid = callSidLookupVariants(CALL_SID);
+    assert.ok(fromCallSid.includes(PROVIDER_ID));
+    assert.ok(fromCallSid.includes(CALL_SID));
 
     const stub = {
         _id: "stub",
