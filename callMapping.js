@@ -263,6 +263,7 @@ async function registerTelnyxCallControlMapping({
     await redis.set(`map:telnyx:id:${id}`, JSON.stringify(entry), "EX", ttlSec);
     logger.info("[CallMapping] Stored Telnyx call_control_id mapping", {
         call_control_id: id,
+        call_id: entry.call_id || null,
         contact_id: entry.contact_id,
     });
 }

@@ -137,6 +137,7 @@ function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIs
 function buildTelnyxStatusEvent({
     callControlId,
     eventType,
+    eventId,
     hangupCause,
     durationSec,
     timestampIso,
@@ -147,6 +148,7 @@ function buildTelnyxStatusEvent({
         data: {
             call_control_id: callControlId,
             event_type: eventType,
+            event_id: eventId || null,
             hangup_cause: hangupCause || null,
             CallDuration: durationSec == null ? null : durationSec,
             Timestamp: timestampIso,
@@ -235,7 +237,11 @@ async function upsertTelnyxAnchoredCallLog({
     if (campaignId) $set.campaign_id = campaignId;
     if (contactId) $set.contact_id = contactId;
     if (externalLead) $set["telnyx.external_lead_id"] = externalLead;
-    if (externalCall) $set["telnyx.external_call_id"] = externalCall;
+    if (externalCall) {
+        $set["telnyx.external_call_id"] = externalCall;
+        // Dialer call_unique_id for worker/analysis lookup (Twilio uses twilio.external_call_id the same way).
+        $set.call_unique_id = externalCall;
+    }
 
     const $setOnInsert = {
         createdAt: now,
