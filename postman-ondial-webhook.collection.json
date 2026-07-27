@@ -1,0 +1,554 @@
+{
+  "info": {
+    "_postman_id": "ondial-webhook-2026-07-27",
+    "name": "Ondial Webhook API",
+    "description": "# Ondial Webhook Service\n\nBase URL: `{{baseUrl}}` (default `http://localhost:9000`)\n\n## Identity model\n| Field | Meaning |\n|-------|--------|\n| `call_id` / `call_unique_id` | Dialer id (preferred for clients) |\n| `CallSid` | Twilio carrier id |\n| `call_control_id` | Telnyx carrier id |\n\nAfter dial, worker posts mapping so clients can use **only `call_id`** for conversation/hangup.\n\n## Typical flows\n1. **India pool:** outbound-mapping → receiver events/CDR → `/pool/conversation` (or `/conversation` with `call_id`)\n2. **Twilio:** twilio-mapping → `/twilio/call-status` → `/conversation` `{ call_id, turns }`\n3. **Telnyx:** telnyx-mapping → `/telnyx/webhooks` → `/conversation` `{ call_id, turns }`\n\n## Auth\n- Hangup routes: `x-webhook-secret: {{WEBHOOK_INTERNAL_SECRET}}`\n- Dev without secrets: often permissive\n- Telnyx Mission Control webhooks: optional signature when `TELNYX_PUBLIC_KEY` set\n- AiSensy: optional `x-aisensy-signature`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:9000" },
+    { "key": "WEBHOOK_INTERNAL_SECRET", "value": "change-me-internal" },
+    { "key": "campaignId", "value": "6a645697e92ab39140ccc3aa" },
+    { "key": "contactId", "value": "6a6456a8e92ab39140ccc486" },
+    { "key": "callUniqueId", "value": "11111111-2222-4333-8444-555555555555" },
+    { "key": "twilioCallSid", "value": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" },
+    { "key": "telnyxCallControlId", "value": "v3:example-call-control-id-abc123" },
+    { "key": "fromNumber", "value": "+14175130042" },
+    { "key": "toNumber", "value": "+919876543210" },
+    { "key": "inboundCallId", "value": "inbound-uuid-aaaa-bbbb-cccc-dddddddddddd" }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health",
+            "description": "Liveness. `{ status, time }`"
+          },
+          "response": []
+        },
+        {
+          "name": "Health SLO (queue lag)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health/slo",
+            "description": "Health + BullMQ webhook queue snapshot."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1. Realtime SSE",
+      "item": [
+        {
+          "name": "SSE listen (optional campaign filter)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "text/event-stream" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sse/listen?campaignId={{campaignId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "sse", "listen"],
+              "query": [
+                { "key": "campaignId", "value": "{{campaignId}}", "description": "Optional filter" }
+              ]
+            },
+            "description": "Keep open. Events: `data: {...}\\n\\n`"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Call Mappings (after dial)",
+      "item": [
+        {
+          "name": "Outbound mapping (India / dialer)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_unique_id\": \"{{callUniqueId}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"phone\": \"{{toNumber}}\",\n  \"lead_id\": \"{{callUniqueId}}\",\n  \"is_test_call\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/outbound-call-mapping",
+            "description": "Worker → Redis. Required: `call_unique_id`|`call_id` + `contact_id`."
+          },
+          "response": []
+        },
+        {
+          "name": "Twilio mapping",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"twilio_call_sid\": \"{{twilioCallSid}}\",\n  \"CallSid\": \"{{twilioCallSid}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"lead_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"is_test_call\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/twilio-mapping",
+            "description": "Right after Twilio returns CallSid. Also writes reverse `map:dialer:{call_id}`."
+          },
+          "response": []
+        },
+        {
+          "name": "Telnyx mapping",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_control_id\": \"{{telnyxCallControlId}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"call_unique_id\": \"{{callUniqueId}}\",\n  \"lead_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"is_test_call\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/telnyx-mapping",
+            "description": "Right after Telnyx returns call_control_id. Also writes reverse dialer map."
+          },
+          "response": []
+        },
+        {
+          "name": "Inbound mapping",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_type\": \"inbound\",\n  \"call_id\": \"{{inboundCallId}}\",\n  \"from_number\": \"{{toNumber}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/inbound-mapping",
+            "description": "Required: `call_id`. Optional: `from_number`, `campaign_id`, `contact_id`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Conversation (preferred: call_id)",
+      "item": [
+        {
+          "name": "Common conversation (call_id only)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"start_time\": \"2026-07-25T06:29:08.000Z\",\n  \"end_time\": \"2026-07-25T06:29:50.000Z\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello, calling from Ondial.\" },\n    { \"role\": \"user\", \"text\": \"Hi, go ahead.\" },\n    { \"role\": \"agent\", \"text\": \"Great — noted.\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/conversation",
+            "description": "Auto-routes:\n- Twilio/Telnyx if dialer→carrier map exists\n- else India/pool by `call_id`"
+          },
+          "response": []
+        },
+        {
+          "name": "India pool conversation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"start_time\": \"2026-07-25T06:29:08.000Z\",\n  \"end_time\": \"2026-07-25T06:29:50.000Z\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Namaste, Ondial se baat kar raha hoon.\" },\n    { \"role\": \"user\", \"text\": \"Haan, boliye.\" },\n    { \"role\": \"agent\", \"text\": \"Aapka order confirm karna tha.\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/pool/conversation",
+            "description": "India pool. Alias: `POST /india/conversation`.\nRequired: `call_id` + turns/conversation/messages/transcript."
+          },
+          "response": []
+        },
+        {
+          "name": "India via common (provider=pool)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"pool\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Explicit pool provider.\" },\n    { \"role\": \"user\", \"text\": \"Theek hai.\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/conversation",
+            "description": "`provider: pool` or `india` forces pool path."
+          },
+          "response": []
+        },
+        {
+          "name": "Twilio conversation (CallSid legacy)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"CallSid\": \"{{twilioCallSid}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Twilio legacy CallSid body.\" },\n    { \"role\": \"user\", \"text\": \"OK.\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/twilio/conversation",
+            "description": "Also accepts `{ call_id, turns }` after mapping."
+          },
+          "response": []
+        },
+        {
+          "name": "Telnyx conversation (call_control_id legacy)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_control_id\": \"{{telnyxCallControlId}}\",\n  \"call_unique_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Telnyx legacy call_control_id body.\" },\n    { \"role\": \"user\", \"text\": \"Got it.\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/telnyx/conversation",
+            "description": "Also accepts `{ call_id, turns }` after mapping."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Hangup (Twilio / Telnyx)",
+      "item": [
+        {
+          "name": "Common hangup (call_id only)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-secret", "value": "{{WEBHOOK_INTERNAL_SECRET}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_id\": \"{{callUniqueId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/hangup",
+            "description": "Preferred. Needs prior Twilio/Telnyx mapping. Auth: `WEBHOOK_INTERNAL_SECRET`."
+          },
+          "response": []
+        },
+        {
+          "name": "Twilio hangup (CallSid)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-secret", "value": "{{WEBHOOK_INTERNAL_SECRET}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"CallSid\": \"{{twilioCallSid}}\"\n}"
+            },
+            "url": "{{baseUrl}}/twilio/hangup",
+            "description": "Also accepts `{ \"call_id\": \"...\" }`."
+          },
+          "response": []
+        },
+        {
+          "name": "Telnyx hangup (call_control_id)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-secret", "value": "{{WEBHOOK_INTERNAL_SECRET}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"call_control_id\": \"{{telnyxCallControlId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/telnyx/hangup",
+            "description": "Also accepts `{ \"call_id\": \"...\" }`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Twilio status webhooks",
+      "item": [
+        {
+          "name": "Call status — in-progress",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"CallSid\": \"{{twilioCallSid}}\",\n  \"CallStatus\": \"in-progress\",\n  \"CallDuration\": \"0\",\n  \"Timestamp\": \"2026-07-25T06:29:10.000Z\",\n  \"From\": \"{{fromNumber}}\",\n  \"To\": \"{{toNumber}}\"\n}"
+            },
+            "url": "{{baseUrl}}/twilio/call-status",
+            "description": "Required: `CallSid`, `CallStatus`, `Timestamp`."
+          },
+          "response": []
+        },
+        {
+          "name": "Call status — completed",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"CallSid\": \"{{twilioCallSid}}\",\n  \"CallStatus\": \"completed\",\n  \"CallDuration\": \"42\",\n  \"Timestamp\": \"2026-07-25T06:30:00.000Z\",\n  \"From\": \"{{fromNumber}}\",\n  \"To\": \"{{toNumber}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"call_id\": \"{{callUniqueId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/twilio/call-status",
+            "description": "Statuses: queued, ringing, in-progress, completed, busy, failed, no-answer, canceled."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. Telnyx Call Control webhooks",
+      "item": [
+        {
+          "name": "call.initiated",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": {\n    \"record_type\": \"event\",\n    \"id\": \"evt-initiated-001\",\n    \"event_type\": \"call.initiated\",\n    \"occurred_at\": \"2026-07-25T06:29:00.000Z\",\n    \"payload\": {\n      \"call_control_id\": \"{{telnyxCallControlId}}\",\n      \"call_leg_id\": \"leg-001\",\n      \"call_session_id\": \"sess-001\",\n      \"connection_id\": \"3008826073862375087\",\n      \"direction\": \"outgoing\",\n      \"from\": \"{{fromNumber}}\",\n      \"to\": \"{{toNumber}}\",\n      \"state\": \"parked\",\n      \"start_time\": \"2026-07-25T06:29:00.000Z\"\n    }\n  },\n  \"meta\": { \"attempt\": 1 }\n}"
+            },
+            "url": "{{baseUrl}}/telnyx/webhooks",
+            "description": "Mission Control webhook_event_url. Always 2xx ack; work is async."
+          },
+          "response": []
+        },
+        {
+          "name": "call.answered",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": {\n    \"record_type\": \"event\",\n    \"id\": \"evt-answered-001\",\n    \"event_type\": \"call.answered\",\n    \"occurred_at\": \"2026-07-25T06:29:08.000Z\",\n    \"payload\": {\n      \"call_control_id\": \"{{telnyxCallControlId}}\",\n      \"call_leg_id\": \"leg-001\",\n      \"call_session_id\": \"sess-001\",\n      \"connection_id\": \"3008826073862375087\",\n      \"direction\": \"outgoing\",\n      \"from\": \"{{fromNumber}}\",\n      \"to\": \"{{toNumber}}\",\n      \"state\": \"answered\",\n      \"start_time\": \"2026-07-25T06:29:00.000Z\",\n      \"answer_time\": \"2026-07-25T06:29:08.000Z\"\n    }\n  },\n  \"meta\": { \"attempt\": 1 }\n}"
+            },
+            "url": "{{baseUrl}}/telnyx/webhooks",
+            "description": "Answered event."
+          },
+          "response": []
+        },
+        {
+          "name": "call.hangup",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": {\n    \"record_type\": \"event\",\n    \"id\": \"evt-hangup-001\",\n    \"event_type\": \"call.hangup\",\n    \"occurred_at\": \"2026-07-25T06:29:50.000Z\",\n    \"payload\": {\n      \"call_control_id\": \"{{telnyxCallControlId}}\",\n      \"call_leg_id\": \"leg-001\",\n      \"call_session_id\": \"sess-001\",\n      \"connection_id\": \"3008826073862375087\",\n      \"direction\": \"outgoing\",\n      \"from\": \"{{fromNumber}}\",\n      \"to\": \"{{toNumber}}\",\n      \"state\": \"hangup\",\n      \"hangup_cause\": \"normal_clearing\",\n      \"hangup_source\": \"callee\",\n      \"start_time\": \"2026-07-25T06:29:00.000Z\",\n      \"end_time\": \"2026-07-25T06:29:50.000Z\",\n      \"duration_secs\": 42\n    }\n  },\n  \"meta\": { \"attempt\": 1 }\n}"
+            },
+            "url": "{{baseUrl}}/telnyx/webhooks",
+            "description": "Hangup — contact sync + billing when duration present."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "7. India pool telephony receiver",
+      "item": [
+        {
+          "name": "Event — call.answered",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-event-id", "value": "evt-pool-answered-001" },
+              { "key": "x-request-id", "value": "req-example-001" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"call.answered\",\n  \"call\": {\n    \"id\": \"{{callUniqueId}}\",\n    \"from\": \"{{fromNumber}}\",\n    \"to\": \"{{toNumber}}\",\n    \"direction\": \"outbound\",\n    \"answeredAt\": \"2026-07-25T06:29:08.000Z\"\n  },\n  \"customParameters\": {\n    \"campaign_id\": \"{{campaignId}}\",\n    \"contact_id\": \"{{contactId}}\",\n    \"call_unique_id\": \"{{callUniqueId}}\"\n  },\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"call_unique_id\": \"{{callUniqueId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/webhooks/receiver",
+            "description": "Enqueued to BullMQ. Events: call.initiated | ringing | answered | completed | failed."
+          },
+          "response": []
+        },
+        {
+          "name": "Event — call.completed",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"call.completed\",\n  \"call\": {\n    \"id\": \"{{callUniqueId}}\",\n    \"from\": \"{{fromNumber}}\",\n    \"to\": \"{{toNumber}}\",\n    \"direction\": \"outbound\",\n    \"answeredAt\": \"2026-07-25T06:29:08.000Z\",\n    \"endedAt\": \"2026-07-25T06:29:50.000Z\",\n    \"duration\": 42,\n    \"recordingUrl\": \"https://example.com/recordings/sample.mp3\"\n  },\n  \"customParameters\": {\n    \"campaign_id\": \"{{campaignId}}\",\n    \"contact_id\": \"{{contactId}}\"\n  },\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"call_unique_id\": \"{{callUniqueId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/webhooks/receiver",
+            "description": "Completed event for pool/legacy dialer."
+          },
+          "response": []
+        },
+        {
+          "name": "CDR summary",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"Call_UniqueId\": \"{{callUniqueId}}\",\n  \"To_number\": \"{{toNumber}}\",\n  \"Duration\": 42,\n  \"CallStatus\": \"ANSWER\",\n  \"RecordingURL\": \"https://example.com/recordings/sample.mp3\",\n  \"lead_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/webhooks/receiver",
+            "description": "CDR shape. Key: `Call_UniqueId`. Status: ANSWER, NOANSWER, BUSY, FAILED, CANCEL."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "8. AiSensy WhatsApp",
+      "item": [
+        {
+          "name": "Delivered",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"delivered\",\n  \"phone\": \"{{toNumber}}\",\n  \"campaignName\": \"July Promo\",\n  \"timestamp\": \"2026-07-25T06:40:00.000Z\"\n}"
+            },
+            "url": "{{baseUrl}}/api/webhook/aisensy",
+            "description": "Types: sent, delivered, read, failed, replied."
+          },
+          "response": []
+        },
+        {
+          "name": "Replied / STOP",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"replied\",\n  \"phone\": \"{{toNumber}}\",\n  \"text\": \"STOP\",\n  \"timestamp\": \"2026-07-25T06:41:00.000Z\",\n  \"campaignName\": \"July Promo\"\n}"
+            },
+            "url": "{{baseUrl}}/api/webhook/aisensy",
+            "description": "STOP / UNSUBSCRIBE / OPT OUT → opt-out handling."
+          },
+          "response": []
+        },
+        {
+          "name": "Events batch",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"events\": [\n    {\n      \"type\": \"sent\",\n      \"phone\": \"{{toNumber}}\",\n      \"campaignName\": \"July Promo\",\n      \"timestamp\": \"2026-07-25T06:39:00.000Z\"\n    },\n    {\n      \"type\": \"delivered\",\n      \"phone\": \"{{toNumber}}\",\n      \"campaignName\": \"July Promo\",\n      \"timestamp\": \"2026-07-25T06:39:05.000Z\"\n    }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/webhook/aisensy",
+            "description": "Batch via `events[]`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "9. Example E2E sequences",
+      "description": "Run folders 2 → 5/6/7 → 3 in order. Set collection variables to real ids first.",
+      "item": [
+        {
+          "name": "A) India pool — mapping then conversation",
+          "item": [
+            {
+              "name": "1. Outbound mapping",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_unique_id\": \"{{callUniqueId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"phone\": \"{{toNumber}}\"\n}"
+                },
+                "url": "{{baseUrl}}/api/outbound-call-mapping"
+              },
+              "response": []
+            },
+            {
+              "name": "2. Pool conversation",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Namaste.\" },\n    { \"role\": \"user\", \"text\": \"Haan.\" }\n  ]\n}"
+                },
+                "url": "{{baseUrl}}/pool/conversation"
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B) Telnyx — mapping → webhook → conversation → hangup",
+          "item": [
+            {
+              "name": "1. Telnyx mapping",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_control_id\": \"{{telnyxCallControlId}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\"\n}"
+                },
+                "url": "{{baseUrl}}/api/telnyx-mapping"
+              },
+              "response": []
+            },
+            {
+              "name": "2. Conversation by call_id",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Telnyx.\" },\n    { \"role\": \"user\", \"text\": \"Hi.\" }\n  ]\n}"
+                },
+                "url": "{{baseUrl}}/conversation"
+              },
+              "response": []
+            },
+            {
+              "name": "3. Hangup by call_id",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-webhook-secret", "value": "{{WEBHOOK_INTERNAL_SECRET}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\"\n}"
+                },
+                "url": "{{baseUrl}}/hangup"
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "C) Twilio — mapping → conversation by call_id",
+          "item": [
+            {
+              "name": "1. Twilio mapping",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"CallSid\": \"{{twilioCallSid}}\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\"\n}"
+                },
+                "url": "{{baseUrl}}/api/twilio-mapping"
+              },
+              "response": []
+            },
+            {
+              "name": "2. Conversation by call_id",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Twilio.\" },\n    { \"role\": \"user\", \"text\": \"Thanks.\" }\n  ]\n}"
+                },
+                "url": "{{baseUrl}}/conversation"
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

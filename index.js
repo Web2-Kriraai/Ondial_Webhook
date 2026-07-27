@@ -6,6 +6,7 @@ const { connectDB, getDb } = require("./db");
 const { connectRedis } = require("./redis");
 const {
     registerCallMapping,
+    lookupMapping,
     normalizePhone,
     normalizeCallId,
     registerTwilioCallSidMapping,
@@ -43,6 +44,11 @@ const { maybeDeductTelnyxCallCredits } = require("./lib/telnyxCallBilling");
 const { hangupCallControl, isTelnyxConfigured } = require("./lib/telnyxClient");
 const { hangupTwilioCall, isTwilioConfigured } = require("./lib/twilioClient");
 const { resolveTelephonyProvider } = require("./lib/resolveTelephonyProvider");
+const {
+    enrichBodyWithCarrierIds,
+    pickDialerCallId,
+    hasCarrierId,
+} = require("./lib/resolveCarrierFromCallId");
 const {
     mapTwilioCallStatusToReceiveStatus,
     resolveTwilioContactId,
@@ -1130,12 +1136,23 @@ async function handleTelnyxHangup(req, res) {
     if (!isTelnyxConfigured()) {
         return res.status(503).json({ error: "Telnyx is not configured (TELNYX_API_KEY)" });
     }
-    const body = req.body || {};
+    const enriched = await enrichBodyWithCarrierIds(req.body || {});
+    if (enriched.error === "call_id_not_mapped") {
+        return res.status(404).json({
+            error: "call_id_not_mapped",
+            details: "No Telnyx call_control_id found for this call_id. Ensure /api/telnyx-mapping ran after dial.",
+            call_id: enriched.dialerCallId,
+        });
+    }
+    const body = enriched.body;
     const callControlId = normalizeTelnyxCallControlId(
         body.call_control_id || body.callControlId
     );
     if (!callControlId) {
-        return res.status(400).json({ error: "call_control_id is required" });
+        return res.status(400).json({
+            error: "call_control_id_or_call_id_required",
+            details: "Pass call_control_id, or call_id / call_unique_id after mapping exists.",
+        });
     }
     try {
         await hangupCallControl(callControlId);
@@ -1143,6 +1160,8 @@ async function handleTelnyxHangup(req, res) {
             success: true,
             provider: "telnyx",
             call_control_id: callControlId,
+            call_id: enriched.dialerCallId || body.call_id || null,
+            resolved_from_call_id: enriched.resolved === true,
         });
     } catch (err) {
         logger.error("[Telnyx] Hangup failed", { error: err.message, call_control_id: callControlId });
@@ -1158,12 +1177,23 @@ async function handleTwilioHangup(req, res) {
             error: "Twilio is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)",
         });
     }
-    const body = req.body || {};
+    const enriched = await enrichBodyWithCarrierIds(req.body || {});
+    if (enriched.error === "call_id_not_mapped") {
+        return res.status(404).json({
+            error: "call_id_not_mapped",
+            details: "No Twilio CallSid found for this call_id. Ensure /api/twilio-mapping ran after dial.",
+            call_id: enriched.dialerCallId,
+        });
+    }
+    const body = enriched.body;
     const callSid = normalizeTwilioCallSid(
         body.CallSid || body.call_sid || body.twilio_call_sid
     );
     if (!callSid) {
-        return res.status(400).json({ error: "CallSid is required" });
+        return res.status(400).json({
+            error: "CallSid_or_call_id_required",
+            details: "Pass CallSid, or call_id / call_unique_id after mapping exists.",
+        });
     }
     try {
         await hangupTwilioCall(callSid);
@@ -1171,6 +1201,8 @@ async function handleTwilioHangup(req, res) {
             success: true,
             provider: "twilio",
             CallSid: callSid,
+            call_id: enriched.dialerCallId || body.call_id || null,
+            resolved_from_call_id: enriched.resolved === true,
         });
     } catch (err) {
         logger.error("[Twilio] Hangup failed", { error: err.message, CallSid: callSid });
@@ -1180,17 +1212,28 @@ async function handleTwilioHangup(req, res) {
 
 /**
  * Common hangup — routes by provider / id fields.
- * Body: { provider?: 'twilio'|'telnyx', CallSid? | call_control_id? }
+ * Preferred body: { call_id } (or call_unique_id). Carrier ids optional.
+ * Legacy: { provider?: 'twilio'|'telnyx', CallSid? | call_control_id? }
  */
 async function handleCommonHangup(req, res) {
     if (rejectUnauthorizedControlRequest(req, res)) return;
+    const enriched = await enrichBodyWithCarrierIds(req.body || {});
+    if (enriched.error === "call_id_not_mapped") {
+        return res.status(404).json({
+            error: "call_id_not_mapped",
+            details:
+                "No carrier mapping found for this call_id. Ensure /api/twilio-mapping or /api/telnyx-mapping ran after dial.",
+            call_id: enriched.dialerCallId,
+        });
+    }
+    req.body = enriched.body;
     const provider = resolveTelephonyProvider(req.body || {});
     if (provider === "telnyx") return handleTelnyxHangup(req, res);
     if (provider === "twilio") return handleTwilioHangup(req, res);
     return res.status(400).json({
-        error: "provider_required",
+        error: "provider_or_call_id_required",
         details:
-            "Set provider=twilio|telnyx, or pass CallSid / call_control_id so the provider can be inferred.",
+            "Pass call_id / call_unique_id (preferred), or provider=twilio|telnyx with CallSid / call_control_id.",
     });
 }
 
@@ -1200,7 +1243,16 @@ app.post("/hangup", handleCommonHangup);
 
 // ─── Telnyx Conversation Store Endpoint ───────────────────────────────────────
 async function handleTelnyxConversation(req, res) {
-    const body = req.body || {};
+    const enriched = await enrichBodyWithCarrierIds(req.body || {});
+    if (enriched.error === "call_id_not_mapped") {
+        return res.status(404).json({
+            received: false,
+            error: "call_id_not_mapped",
+            details: "No Telnyx call_control_id found for this call_id. Ensure /api/telnyx-mapping ran after dial.",
+            call_id: enriched.dialerCallId,
+        });
+    }
+    const body = enriched.body;
     const sid = normalizeTelnyxCallControlId(
         body.call_control_id || body.telnyx_call_control_id || body.callControlId
     );
@@ -1208,7 +1260,8 @@ async function handleTelnyxConversation(req, res) {
         return res.status(400).json({
             received: false,
             error: "missing_required_fields",
-            missing: ["call_control_id"],
+            missing: ["call_control_id_or_call_id"],
+            details: "Pass call_control_id, or call_id / call_unique_id after mapping exists.",
         });
     }
 
@@ -1422,16 +1475,26 @@ async function handleTelnyxConversation(req, res) {
 }
 
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
-// Receives: { CallSid, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
+// Receives: { CallSid?, call_id?, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
 async function handleTwilioConversation(req, res) {
-    const body = req.body || {};
+    const enriched = await enrichBodyWithCarrierIds(req.body || {});
+    if (enriched.error === "call_id_not_mapped") {
+        return res.status(404).json({
+            received: false,
+            error: "call_id_not_mapped",
+            details: "No Twilio CallSid found for this call_id. Ensure /api/twilio-mapping ran after dial.",
+            call_id: enriched.dialerCallId,
+        });
+    }
+    const body = enriched.body;
     logTwilioWebhookEvent(req, "[Twilio] Conversation webhook payload", body);
     const sid = normalizeTwilioCallSid(body.CallSid || body.call_sid || body.twilio_call_sid);
     if (!sid) {
         return res.status(400).json({
             received: false,
             error: "missing_required_fields",
-            missing: ["CallSid"],
+            missing: ["CallSid_or_call_id"],
+            details: "Pass CallSid, or call_id / call_unique_id after mapping exists.",
         });
     }
 
@@ -1672,21 +1735,277 @@ async function handleTwilioConversation(req, res) {
 }
 
 /**
- * Common conversation store — routes by provider / id fields.
- * Body: { provider?: 'twilio'|'telnyx', CallSid? | call_control_id?, turns|conversation|... }
+ * India / pool conversation store — dialer call_id only (no CallSid / call_control_id).
+ * Body: { call_id | call_unique_id, turns|conversation|..., campaign_id?, contact_id? }
  */
-async function handleCommonConversation(req, res) {
-    const provider = resolveTelephonyProvider(req.body || {});
-    if (provider === "telnyx") return handleTelnyxConversation(req, res);
-    if (provider === "twilio") return handleTwilioConversation(req, res);
-    return res.status(400).json({
-        received: false,
-        error: "provider_required",
-        details:
-            "Set provider=twilio|telnyx, or pass CallSid / call_control_id so the provider can be inferred.",
+async function handlePoolConversation(req, res) {
+    const body = req.body || {};
+    const callKey = normalizeCallId(
+        body.call_id || body.call_unique_id || body.callUniqueId || body.Call_UniqueId
+    );
+    if (!callKey) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_required_fields",
+            missing: ["call_id"],
+            details: "India/pool conversation requires call_id (or call_unique_id).",
+        });
+    }
+
+    const normalizedConversation = normalizeTwilioConversationPayload(body);
+    if (!normalizedConversation.turns.length) {
+        return res.status(400).json({
+            received: false,
+            error: "missing_conversation_payload",
+            details: "Provide `turns`, `conversation`, `messages`, or `transcript`.",
+        });
+    }
+
+    const mapping = await lookupMapping(callKey);
+    const startTimeRaw =
+        typeof body.start_time === "string"
+            ? body.start_time
+            : typeof body.startTime === "string"
+              ? body.startTime
+              : null;
+    const endTimeRaw =
+        typeof body.end_time === "string"
+            ? body.end_time
+            : typeof body.endTime === "string"
+              ? body.endTime
+              : null;
+    const normalizedStartTime =
+        startTimeRaw && !Number.isNaN(new Date(startTimeRaw).getTime())
+            ? new Date(startTimeRaw).toISOString()
+            : null;
+    const normalizedEndTime =
+        endTimeRaw && !Number.isNaN(new Date(endTimeRaw).getTime())
+            ? new Date(endTimeRaw).toISOString()
+            : null;
+
+    const legacyConversation = buildLegacyConversationShape({
+        turns: normalizedConversation.turns,
+        transcript: normalizedConversation.transcript,
+        startTime: normalizedStartTime,
+        endTime: normalizedEndTime,
+    });
+
+    const contactId =
+        (body.contact_id != null && String(body.contact_id).trim()) ||
+        (mapping?.contact_id != null && String(mapping.contact_id).trim()) ||
+        "";
+    const campaignId =
+        (body.campaign_id != null && String(body.campaign_id).trim()) ||
+        (mapping?.campaign_id != null && String(mapping.campaign_id).trim()) ||
+        "";
+    const leadId =
+        (body.lead_id != null && String(body.lead_id).trim()) ||
+        (mapping?.lead_id != null && String(mapping.lead_id).trim()) ||
+        callKey;
+
+    const eventDoc = {
+        timestamp: new Date().toISOString(),
+        event_type: "pool_conversation_upserted",
+        data: {
+            call_id: callKey,
+            turn_count: normalizedConversation.turns.length,
+            provider: "pool",
+        },
+    };
+
+    const setFields = {
+        call_unique_id: callKey,
+        lead_id: leadId,
+        provider: "pool",
+        "conversation.updatedAt": new Date().toISOString(),
+        "conversation.turns": legacyConversation.turns,
+        "conversation.transcript": legacyConversation.transcript,
+        "pool.conversation.updatedAt": new Date().toISOString(),
+        "pool.conversation.turns": normalizedConversation.turns,
+        "pool.conversation.turnCount": normalizedConversation.turns.length,
+        "pool.conversation.transcript": legacyConversation.transcript,
+        updatedAt: new Date(),
+    };
+    if (campaignId) setFields.campaign_id = campaignId;
+    if (contactId) setFields.contact_id = contactId;
+    if (inferIsTestCallFromWebhookBody(body) || mapping?.is_test_call === true) {
+        setFields.isTestCall = true;
+    }
+    if (legacyConversation.start_time) {
+        setFields["conversation.start_time"] = legacyConversation.start_time;
+    }
+    if (legacyConversation.end_time) {
+        setFields["conversation.end_time"] = legacyConversation.end_time;
+    }
+
+    const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
+    const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
+    const mappedCollection =
+        mapping?.collectionName && String(mapping.collectionName).trim()
+            ? String(mapping.collectionName).trim()
+            : null;
+    const primaryCollection =
+        mappedCollection ||
+        resolveCollection({ contact_id: contactId }) ||
+        (await resolveOutboundCollection()) ||
+        CALLLOGS_COLLECTION;
+    const collectionsOrdered = [
+        ...new Set([primaryCollection, CALLLOGS_COLLECTION, TESTCALL_COLLECTION]),
+    ];
+
+    const filters = [
+        { call_unique_id: callKey },
+        { lead_id: callKey },
+        { call_id: callKey },
+    ];
+
+    const db = getDb();
+    let updated = false;
+    let matchedCollection = primaryCollection;
+
+    for (const collectionName of collectionsOrdered) {
+        for (const filter of filters) {
+            const result = await db.collection(collectionName).updateOne(filter, {
+                $set: setFields,
+                $setOnInsert: {
+                    createdAt: new Date().toISOString(),
+                    call_id: callKey,
+                },
+                $push: { "call_data.events": eventDoc },
+            });
+            if (result.matchedCount > 0) {
+                updated = true;
+                matchedCollection = collectionName;
+                break;
+            }
+        }
+        if (updated) break;
+    }
+
+    if (!updated) {
+        await db.collection(primaryCollection).updateOne(
+            { call_unique_id: callKey },
+            {
+                $set: setFields,
+                $setOnInsert: {
+                    createdAt: new Date().toISOString(),
+                    call_id: callKey,
+                    lead_id: leadId,
+                },
+                $push: { "call_data.events": eventDoc },
+            },
+            { upsert: true }
+        );
+        updated = true;
+        matchedCollection = primaryCollection;
+    }
+
+    const storedDoc = await db.collection(matchedCollection).findOne(
+        {
+            $or: [
+                { call_unique_id: callKey },
+                { lead_id: callKey },
+                { call_id: callKey },
+            ],
+        },
+        {
+            projection: {
+                _id: 1,
+                campaign_id: 1,
+                contact_id: 1,
+                call_id: 1,
+                call_unique_id: 1,
+                "conversation.turns": 1,
+                isTestCall: 1,
+            },
+        }
+    );
+
+    emitCallUpdateSse({
+        campaign_id: storedDoc?.campaign_id || campaignId || null,
+        call_id: storedDoc?.call_unique_id || storedDoc?.call_id || callKey,
+        contact_id: storedDoc?.contact_id || contactId || null,
+        status: null,
+        event: "pool_conversation",
+        provider: "pool",
+        turnCount: normalizedConversation.turns.length,
+    });
+
+    triggerCallAnalysis(callKey).catch((err) => {
+        logger.warn("[Pool] Analysis trigger failed after conversation store", {
+            call_id: callKey,
+            error: err.message,
+        });
+    });
+
+    logger.info("[Pool] Conversation stored", {
+        call_id: callKey,
+        turnCount: normalizedConversation.turns.length,
+        collection: matchedCollection,
+        campaign_id: campaignId || null,
+        contact_id: contactId || null,
+        hadMapping: !!mapping,
+    });
+
+    return res.status(200).json({
+        received: true,
+        updated: !!updated,
+        provider: "pool",
+        call_id: callKey,
+        turnCount: normalizedConversation.turns.length,
+        collection: matchedCollection,
     });
 }
 
+/**
+ * Common conversation store — routes by provider / id fields.
+ * Preferred: { call_id, turns|conversation|... }
+ * India/pool: { provider?: "pool", call_id, turns|... } or /pool/conversation
+ * Foreign: { provider?: twilio|telnyx, CallSid? | call_control_id?, turns|... }
+ */
+async function handleCommonConversation(req, res) {
+    const rawBody = req.body || {};
+    const explicit = String(rawBody.provider || rawBody.telephony_provider || "")
+        .trim()
+        .toLowerCase();
+    if (explicit === "pool" || explicit === "india") {
+        return handlePoolConversation(req, res);
+    }
+
+    // Carrier ids present → foreign path.
+    if (hasCarrierId(rawBody)) {
+        const enriched = await enrichBodyWithCarrierIds(rawBody);
+        req.body = enriched.body;
+        const provider = resolveTelephonyProvider(req.body || {});
+        if (provider === "telnyx") return handleTelnyxConversation(req, res);
+        if (provider === "twilio") return handleTwilioConversation(req, res);
+    }
+
+    const enriched = await enrichBodyWithCarrierIds(rawBody);
+    if (enriched.resolved) {
+        req.body = enriched.body;
+        const provider = resolveTelephonyProvider(req.body || {});
+        if (provider === "telnyx") return handleTelnyxConversation(req, res);
+        if (provider === "twilio") return handleTwilioConversation(req, res);
+    }
+
+    // No Twilio/Telnyx mapping — India/pool dialer call_id conversation.
+    const dialerId = enriched.dialerCallId || pickDialerCallId(rawBody);
+    if (dialerId) {
+        req.body = { ...rawBody, call_id: dialerId };
+        return handlePoolConversation(req, res);
+    }
+
+    return res.status(400).json({
+        received: false,
+        error: "provider_or_call_id_required",
+        details:
+            "Pass call_id (India/pool or mapped foreign call), or provider=twilio|telnyx|pool with carrier ids when needed.",
+    });
+}
+
+app.post("/pool/conversation", handlePoolConversation);
+app.post("/india/conversation", handlePoolConversation);
 app.post("/telnyx/conversation", handleTelnyxConversation);
 app.post("/twilio/conversation", handleTwilioConversation);
 app.post("/conversation", handleCommonConversation);

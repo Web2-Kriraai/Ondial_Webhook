@@ -206,8 +206,32 @@ async function registerTwilioCallSidMapping({
     const redis = getRedis();
     const ttlSec = Math.ceil(TTL_MS / 1000);
     await redis.set(`map:twilio:sid:${sid}`, JSON.stringify(entry), "EX", ttlSec);
+
+    // Reverse index: dialer call_id → carrier ids (for /hangup + /conversation call_id-first).
+    const dialerKey = normalizeCallId(entry.call_id);
+    if (dialerKey) {
+        await redis.set(
+            `map:dialer:${dialerKey}`,
+            JSON.stringify({
+                provider: "twilio",
+                twilio_call_sid: sid,
+                CallSid: sid,
+                call_id: dialerKey,
+                lead_id: entry.lead_id,
+                campaign_id: entry.campaign_id,
+                contact_id: entry.contact_id,
+                collectionName: entry.collectionName || "",
+                is_test_call: entry.is_test_call === true,
+                updatedAt: Date.now(),
+            }),
+            "EX",
+            ttlSec
+        );
+    }
+
     logger.info("[CallMapping] Stored Twilio SID mapping", {
         twilio_call_sid: sid,
+        call_id: dialerKey || null,
         contact_id: entry.contact_id,
     });
 }
@@ -261,9 +285,32 @@ async function registerTelnyxCallControlMapping({
     const redis = getRedis();
     const ttlSec = Math.ceil(TTL_MS / 1000);
     await redis.set(`map:telnyx:id:${id}`, JSON.stringify(entry), "EX", ttlSec);
+
+    // Reverse index: dialer call_id → carrier ids (for /hangup + /conversation call_id-first).
+    const dialerKey = normalizeCallId(entry.call_id);
+    if (dialerKey) {
+        await redis.set(
+            `map:dialer:${dialerKey}`,
+            JSON.stringify({
+                provider: "telnyx",
+                call_control_id: id,
+                telnyx_call_control_id: id,
+                call_id: dialerKey,
+                lead_id: entry.lead_id,
+                campaign_id: entry.campaign_id,
+                contact_id: entry.contact_id,
+                collectionName: entry.collectionName || "",
+                is_test_call: entry.is_test_call === true,
+                updatedAt: Date.now(),
+            }),
+            "EX",
+            ttlSec
+        );
+    }
+
     logger.info("[CallMapping] Stored Telnyx call_control_id mapping", {
         call_control_id: id,
-        call_id: entry.call_id || null,
+        call_id: dialerKey || null,
         contact_id: entry.contact_id,
     });
 }
@@ -273,6 +320,18 @@ async function lookupTelnyxCallControlMapping(callControlId) {
     if (!id) return null;
     const redis = getRedis();
     const raw = await redis.get(`map:telnyx:id:${id}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
+/**
+ * Reverse lookup: dialer call_id / call_unique_id → carrier mapping entry.
+ * Reads Redis `map:dialer:{call_id}` written by Twilio/Telnyx mapping registration.
+ */
+async function lookupDialerCallMapping(callId) {
+    const key = normalizeCallId(callId);
+    if (!key) return null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:dialer:${key}`);
     return raw ? JSON.parse(raw) : null;
 }
 
@@ -291,4 +350,5 @@ module.exports = {
     registerTelnyxCallControlMapping,
     lookupTelnyxCallControlMapping,
     normalizeTelnyxCallControlId,
+    lookupDialerCallMapping,
 };
