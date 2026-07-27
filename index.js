@@ -1584,9 +1584,10 @@ async function handleTelnyxConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(sid).catch((err) => {
+    triggerCallAnalysis(dialerCallUniqueId || enriched.dialerCallId || sid).catch((err) => {
         logger.warn("[Telnyx] Analysis trigger failed after conversation store", {
             call_control_id: sid,
+            call_id: dialerCallUniqueId || enriched.dialerCallId || null,
             error: err.message,
         });
     });
