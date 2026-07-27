@@ -130,16 +130,16 @@
       "name": "3. Conversation (preferred: call_id)",
       "item": [
         {
-          "name": "Common conversation (call_id only)",
+          "name": "Common conversation (call_id)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"start_time\": \"2026-07-25T06:29:08.000Z\",\n  \"end_time\": \"2026-07-25T06:29:50.000Z\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello, calling from Ondial.\" },\n    { \"role\": \"user\", \"text\": \"Hi, go ahead.\" },\n    { \"role\": \"agent\", \"text\": \"Great — noted.\" }\n  ]\n}"
+              "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"start_time\": \"2026-07-25T06:29:08.000Z\",\n  \"end_time\": \"2026-07-25T06:29:50.000Z\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello, calling from Ondial.\" },\n    { \"role\": \"user\", \"text\": \"Hi, go ahead.\" },\n    { \"role\": \"agent\", \"text\": \"Great — noted.\" }\n  ]\n}"
             },
             "url": "{{baseUrl}}/conversation",
-            "description": "Auto-routes:\n- Twilio/Telnyx if dialer→carrier map exists\n- else India/pool by `call_id`"
+            "description": "Preferred body: `call_id` + `campaign_id` + `contact_id` + turns.\nAuto-routes:\n- Twilio/Telnyx if dialer→carrier map exists\n- else India/pool by `call_id`"
           },
           "response": []
         },
@@ -164,7 +164,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"provider\": \"pool\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Explicit pool provider.\" },\n    { \"role\": \"user\", \"text\": \"Theek hai.\" }\n  ]\n}"
+              "raw": "{\n  \"provider\": \"pool\",\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Explicit pool provider.\" },\n    { \"role\": \"user\", \"text\": \"Theek hai.\" }\n  ]\n}"
             },
             "url": "{{baseUrl}}/conversation",
             "description": "`provider: pool` or `india` forces pool path."
@@ -462,7 +462,7 @@
                 "header": [{ "key": "Content-Type", "value": "application/json" }],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Namaste.\" },\n    { \"role\": \"user\", \"text\": \"Haan.\" }\n  ]\n}"
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Namaste.\" },\n    { \"role\": \"user\", \"text\": \"Haan.\" }\n  ]\n}"
                 },
                 "url": "{{baseUrl}}/pool/conversation"
               },
@@ -493,7 +493,7 @@
                 "header": [{ "key": "Content-Type", "value": "application/json" }],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Telnyx.\" },\n    { \"role\": \"user\", \"text\": \"Hi.\" }\n  ]\n}"
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Telnyx.\" },\n    { \"role\": \"user\", \"text\": \"Hi.\" }\n  ]\n}"
                 },
                 "url": "{{baseUrl}}/conversation"
               },
@@ -540,7 +540,7 @@
                 "header": [{ "key": "Content-Type", "value": "application/json" }],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Twilio.\" },\n    { \"role\": \"user\", \"text\": \"Thanks.\" }\n  ]\n}"
+                  "raw": "{\n  \"call_id\": \"{{callUniqueId}}\",\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"turns\": [\n    { \"role\": \"agent\", \"text\": \"Hello from Twilio.\" },\n    { \"role\": \"user\", \"text\": \"Thanks.\" }\n  ]\n}"
                 },
                 "url": "{{baseUrl}}/conversation"
               },

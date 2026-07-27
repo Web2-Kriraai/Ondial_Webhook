@@ -242,6 +242,48 @@ function logTwilioEventData(label, data) {
     console.log(`\n${label}\n${formatJsonPretty(event)}\n`);
 }
 
+/**
+ * Structured ingress log for Telnyx / conversation / hangup (PM2-friendly).
+ * Avoids dumping huge turn text arrays at info — turnCount only unless DEBUG_WEBHOOK_PAYLOAD=1.
+ */
+function logIngressEvent(req, label, body = {}, extra = {}) {
+    const safe = cloneJsonSafe(body) || {};
+    const turns = Array.isArray(safe.turns)
+        ? safe.turns
+        : Array.isArray(safe.conversation)
+          ? safe.conversation
+          : Array.isArray(safe.messages)
+            ? safe.messages
+            : null;
+    const turnCount = turns ? turns.length : null;
+    const dumpPayload =
+        String(process.env.DEBUG_WEBHOOK_PAYLOAD || "").trim() === "1" ||
+        String(process.env.DEBUG_WEBHOOK_PAYLOAD || "")
+            .trim()
+            .toLowerCase() === "true";
+
+    const envelope = {
+        method: req?.method || null,
+        url: req?.originalUrl || req?.url || null,
+        ip: req?.ip || null,
+        call_id: safe.call_id || safe.call_unique_id || safe.callUniqueId || null,
+        call_control_id:
+            safe.call_control_id || safe.telnyx_call_control_id || safe.callControlId || null,
+        CallSid: safe.CallSid || safe.call_sid || safe.twilio_call_sid || null,
+        campaign_id: safe.campaign_id || null,
+        contact_id: safe.contact_id || null,
+        provider: safe.provider || safe.telephony_provider || null,
+        turnCount,
+        ...extra,
+    };
+    if (dumpPayload) {
+        envelope.payload = safe;
+    }
+
+    logger.info(label, envelope);
+    console.log(`\n${label}\n${formatJsonPretty(envelope)}\n`);
+}
+
 function normalizeTwilioConversationTurn(raw, idx) {
     if (!raw || typeof raw !== "object") return null;
     const roleRaw = raw.role || raw.speaker || raw.from || "unknown";
@@ -1060,7 +1102,14 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     return {
         outcome: "processed",
         event_type: eventType || null,
+        event_id: eventId || null,
+        call_control_id: callControlId,
+        call_id: mappedCallId || null,
+        campaign_id: campaignId || null,
+        contact_id: contactId || null,
         status,
+        duration: duration || 0,
+        hangup_cause: hangupCause || null,
         credit: creditResult,
         contactSync: contactSyncResult,
     };
@@ -1090,12 +1139,15 @@ app.post("/telnyx/webhooks", async (req, res) => {
 
     const parsed = parseTelnyxWebhookBody(body);
 
-    logger.info("[Telnyx] Webhook received", {
+    logIngressEvent(req, "[Telnyx] Webhook received", body, {
         event_type: parsed.eventType || null,
         event_id: parsed.eventId || null,
         call_control_id: parsed.callControlId || null,
         attempt: parsed.deliveryAttempt,
         direction: parsed.direction || null,
+        hangup_cause: parsed.hangupCause || null,
+        from: parsed.from || null,
+        to: parsed.to || null,
     });
 
     // Always ack immediately — Telnyx retries on non-2xx or >2s latency.
@@ -1106,14 +1158,42 @@ app.post("/telnyx/webhooks", async (req, res) => {
     });
 
     setImmediate(() => {
-        processTelnyxCallControlWebhook(parsed, body).catch((err) => {
-            logger.error("[Telnyx] Async webhook processing failed", {
-                error: err.message,
-                event_type: parsed.eventType || null,
-                event_id: parsed.eventId || null,
-                call_control_id: parsed.callControlId || null,
+        processTelnyxCallControlWebhook(parsed, body)
+            .then((result) => {
+                logger.info("[Telnyx] Webhook processed", {
+                    outcome: result?.outcome || null,
+                    event_type: result?.event_type || parsed.eventType || null,
+                    event_id: result?.event_id || parsed.eventId || null,
+                    call_control_id: result?.call_control_id || parsed.callControlId || null,
+                    call_id: result?.call_id || null,
+                    campaign_id: result?.campaign_id || null,
+                    contact_id: result?.contact_id || null,
+                    status: result?.status || null,
+                    duration: result?.duration ?? null,
+                    hangup_cause: result?.hangup_cause || null,
+                    credit: result?.credit || null,
+                    contactSync: result?.contactSync || null,
+                });
+                if (parsed.eventType === "call.hangup") {
+                    console.log(
+                        `\n[Telnyx] call.hangup managed\n${formatJsonPretty({
+                            call_control_id: result?.call_control_id || parsed.callControlId,
+                            call_id: result?.call_id || null,
+                            status: result?.status || null,
+                            duration: result?.duration ?? null,
+                            credit: result?.credit || null,
+                        })}\n`
+                    );
+                }
+            })
+            .catch((err) => {
+                logger.error("[Telnyx] Async webhook processing failed", {
+                    error: err.message,
+                    event_type: parsed.eventType || null,
+                    event_id: parsed.eventId || null,
+                    call_control_id: parsed.callControlId || null,
+                });
             });
-        });
     });
 });
 
@@ -1138,6 +1218,9 @@ async function handleTelnyxHangup(req, res) {
     }
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
+        logger.warn("[Telnyx] Force hangup call_id not mapped", {
+            call_id: enriched.dialerCallId || null,
+        });
         return res.status(404).json({
             error: "call_id_not_mapped",
             details: "No Telnyx call_control_id found for this call_id. Ensure /api/telnyx-mapping ran after dial.",
@@ -1149,13 +1232,26 @@ async function handleTelnyxHangup(req, res) {
         body.call_control_id || body.callControlId
     );
     if (!callControlId) {
+        logger.warn("[Telnyx] Force hangup missing call_control_id / call_id", {
+            body_keys: Object.keys(body || {}),
+        });
         return res.status(400).json({
             error: "call_control_id_or_call_id_required",
             details: "Pass call_control_id, or call_id / call_unique_id after mapping exists.",
         });
     }
+    logIngressEvent(req, "[Telnyx] Force hangup requested", body, {
+        call_control_id: callControlId,
+        call_id: enriched.dialerCallId || body.call_id || null,
+        resolved_from_call_id: enriched.resolved === true,
+        note: "Optional control API — normal ends use call.hangup → /telnyx/webhooks",
+    });
     try {
         await hangupCallControl(callControlId);
+        logger.info("[Telnyx] Force hangup sent to Telnyx API", {
+            call_control_id: callControlId,
+            call_id: enriched.dialerCallId || body.call_id || null,
+        });
         return res.status(200).json({
             success: true,
             provider: "telnyx",
@@ -1179,6 +1275,9 @@ async function handleTwilioHangup(req, res) {
     }
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
+        logger.warn("[Twilio] Force hangup call_id not mapped", {
+            call_id: enriched.dialerCallId || null,
+        });
         return res.status(404).json({
             error: "call_id_not_mapped",
             details: "No Twilio CallSid found for this call_id. Ensure /api/twilio-mapping ran after dial.",
@@ -1190,13 +1289,25 @@ async function handleTwilioHangup(req, res) {
         body.CallSid || body.call_sid || body.twilio_call_sid
     );
     if (!callSid) {
+        logger.warn("[Twilio] Force hangup missing CallSid / call_id", {
+            body_keys: Object.keys(body || {}),
+        });
         return res.status(400).json({
             error: "CallSid_or_call_id_required",
             details: "Pass CallSid, or call_id / call_unique_id after mapping exists.",
         });
     }
+    logIngressEvent(req, "[Twilio] Force hangup requested", body, {
+        CallSid: callSid,
+        call_id: enriched.dialerCallId || body.call_id || null,
+        resolved_from_call_id: enriched.resolved === true,
+    });
     try {
         await hangupTwilioCall(callSid);
+        logger.info("[Twilio] Force hangup sent to Twilio API", {
+            CallSid: callSid,
+            call_id: enriched.dialerCallId || body.call_id || null,
+        });
         return res.status(200).json({
             success: true,
             provider: "twilio",
@@ -1219,6 +1330,7 @@ async function handleCommonHangup(req, res) {
     if (rejectUnauthorizedControlRequest(req, res)) return;
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
+        logger.warn("[Hangup] call_id not mapped", { call_id: enriched.dialerCallId || null });
         return res.status(404).json({
             error: "call_id_not_mapped",
             details:
@@ -1228,6 +1340,12 @@ async function handleCommonHangup(req, res) {
     }
     req.body = enriched.body;
     const provider = resolveTelephonyProvider(req.body || {});
+    logger.info("[Hangup] Common route", {
+        provider: provider || null,
+        call_id: enriched.dialerCallId || null,
+        resolved_from_call_id: enriched.resolved === true,
+        note: "Force hangup only — natural call end is call.hangup on /telnyx/webhooks",
+    });
     if (provider === "telnyx") return handleTelnyxHangup(req, res);
     if (provider === "twilio") return handleTwilioHangup(req, res);
     return res.status(400).json({
@@ -1245,6 +1363,9 @@ app.post("/hangup", handleCommonHangup);
 async function handleTelnyxConversation(req, res) {
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
+        logger.warn("[Telnyx] Conversation call_id not mapped", {
+            call_id: enriched.dialerCallId || null,
+        });
         return res.status(404).json({
             received: false,
             error: "call_id_not_mapped",
@@ -1253,10 +1374,17 @@ async function handleTelnyxConversation(req, res) {
         });
     }
     const body = enriched.body;
+    logIngressEvent(req, "[Telnyx] Conversation webhook payload", body, {
+        resolved_from_call_id: enriched.resolved === true,
+        dialer_call_id: enriched.dialerCallId || null,
+    });
     const sid = normalizeTelnyxCallControlId(
         body.call_control_id || body.telnyx_call_control_id || body.callControlId
     );
     if (!sid) {
+        logger.warn("[Telnyx] Conversation missing call_control_id / call_id", {
+            body_keys: Object.keys(body || {}),
+        });
         return res.status(400).json({
             received: false,
             error: "missing_required_fields",
@@ -1461,6 +1589,19 @@ async function handleTelnyxConversation(req, res) {
             call_control_id: sid,
             error: err.message,
         });
+    });
+
+    logger.info("[Telnyx] Conversation stored", {
+        call_control_id: sid,
+        call_id: dialerCallUniqueId || enriched.dialerCallId || null,
+        campaign_id: storedDoc?.campaign_id || telnyxMapping?.campaign_id || fallbackCampaignId || null,
+        contact_id: contactForSync || storedDoc?.contact_id || fallbackContactId || null,
+        turnCount: normalizedConversation.turns.length,
+        collection: primaryCollection,
+        updated: !!updated,
+        credit: creditResult,
+        contactSync: contactSyncResult,
+        resolved_from_call_id: enriched.resolved === true,
     });
 
     return res.status(200).json({
@@ -1740,10 +1881,14 @@ async function handleTwilioConversation(req, res) {
  */
 async function handlePoolConversation(req, res) {
     const body = req.body || {};
+    logIngressEvent(req, "[Pool] Conversation webhook payload", body);
     const callKey = normalizeCallId(
         body.call_id || body.call_unique_id || body.callUniqueId || body.Call_UniqueId
     );
     if (!callKey) {
+        logger.warn("[Pool] Conversation missing call_id", {
+            body_keys: Object.keys(body || {}),
+        });
         return res.status(400).json({
             received: false,
             error: "missing_required_fields",
@@ -1883,6 +2028,8 @@ async function handlePoolConversation(req, res) {
     }
 
     if (!updated) {
+        // lead_id / call_unique_id live in $set — do not also put them in $setOnInsert
+        // (Mongo rejects the same path in both operators).
         await db.collection(primaryCollection).updateOne(
             { call_unique_id: callKey },
             {
@@ -1890,7 +2037,6 @@ async function handlePoolConversation(req, res) {
                 $setOnInsert: {
                     createdAt: new Date().toISOString(),
                     call_id: callKey,
-                    lead_id: leadId,
                 },
                 $push: { "call_data.events": eventDoc },
             },
@@ -1969,6 +2115,12 @@ async function handleCommonConversation(req, res) {
         .trim()
         .toLowerCase();
     if (explicit === "pool" || explicit === "india") {
+        logger.info("[Conversation] Common route → pool (explicit provider)", {
+            provider: explicit,
+            call_id: pickDialerCallId(rawBody),
+            campaign_id: rawBody.campaign_id || null,
+            contact_id: rawBody.contact_id || null,
+        });
         return handlePoolConversation(req, res);
     }
 
@@ -1977,6 +2129,12 @@ async function handleCommonConversation(req, res) {
         const enriched = await enrichBodyWithCarrierIds(rawBody);
         req.body = enriched.body;
         const provider = resolveTelephonyProvider(req.body || {});
+        logger.info("[Conversation] Common route → foreign (carrier id in body)", {
+            provider: provider || null,
+            call_id: enriched.dialerCallId || pickDialerCallId(rawBody),
+            campaign_id: req.body.campaign_id || null,
+            contact_id: req.body.contact_id || null,
+        });
         if (provider === "telnyx") return handleTelnyxConversation(req, res);
         if (provider === "twilio") return handleTwilioConversation(req, res);
     }
@@ -1985,6 +2143,13 @@ async function handleCommonConversation(req, res) {
     if (enriched.resolved) {
         req.body = enriched.body;
         const provider = resolveTelephonyProvider(req.body || {});
+        logger.info("[Conversation] Common route → foreign (resolved from call_id map)", {
+            provider: provider || null,
+            call_id: enriched.dialerCallId || null,
+            campaign_id: req.body.campaign_id || null,
+            contact_id: req.body.contact_id || null,
+            mapping_source: enriched.mapping?.source || "redis",
+        });
         if (provider === "telnyx") return handleTelnyxConversation(req, res);
         if (provider === "twilio") return handleTwilioConversation(req, res);
     }
@@ -1992,10 +2157,19 @@ async function handleCommonConversation(req, res) {
     // No Twilio/Telnyx mapping — India/pool dialer call_id conversation.
     const dialerId = enriched.dialerCallId || pickDialerCallId(rawBody);
     if (dialerId) {
+        logger.info("[Conversation] Common route → pool (unmapped call_id)", {
+            call_id: dialerId,
+            campaign_id: rawBody.campaign_id || null,
+            contact_id: rawBody.contact_id || null,
+            enrich_error: enriched.error || null,
+        });
         req.body = { ...rawBody, call_id: dialerId };
         return handlePoolConversation(req, res);
     }
 
+    logger.warn("[Conversation] Common route rejected — no call identity", {
+        body_keys: Object.keys(rawBody || {}),
+    });
     return res.status(400).json({
         received: false,
         error: "provider_or_call_id_required",
