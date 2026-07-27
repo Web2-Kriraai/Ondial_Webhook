@@ -44,6 +44,7 @@ const { maybeDeductTelnyxCallCredits } = require("./lib/telnyxCallBilling");
 const { hangupCallControl, isTelnyxConfigured } = require("./lib/telnyxClient");
 const { hangupTwilioCall, isTwilioConfigured } = require("./lib/twilioClient");
 const { resolveTelephonyProvider } = require("./lib/resolveTelephonyProvider");
+const { isTelnyxCallControlId } = require("./lib/resolveLegacyAnalysisCallId");
 const {
     enrichBodyWithCarrierIds,
     pickDialerCallId,
@@ -66,6 +67,7 @@ const {
     mapTelnyxEventToCallStatus,
     preferTelnyxStatus,
     isInformationalTelnyxEvent,
+    shouldProcessTelnyxEventFully,
     durationSecFromTelnyxPayload,
     extractTelnyxRecordingUrl,
 } = require("./lib/telnyxWebhookParse");
@@ -282,6 +284,24 @@ function logIngressEvent(req, label, body = {}, extra = {}) {
 
     logger.info(label, envelope);
     console.log(`\n${label}\n${formatJsonPretty(envelope)}\n`);
+}
+
+/** True when Mission Control posted a Telnyx Voice API event (often mis-aimed at /twilio/call-status). */
+function looksLikeTelnyxWebhookBody(body = {}) {
+    if (!body || typeof body !== "object") return false;
+    const payload = body.data?.payload || body.payload || null;
+    const eventType = String(
+        body.data?.event_type || body.event_type || body.name || ""
+    )
+        .trim()
+        .toLowerCase();
+    if (payload?.call_control_id || payload?.call_leg_id) return true;
+    if (eventType.startsWith("call.") || eventType.startsWith("streaming.")) return true;
+    return false;
+}
+
+function looksLikeTelnyxCarrierId(value) {
+    return isTelnyxCallControlId(value);
 }
 
 function normalizeTwilioConversationTurn(raw, idx) {
@@ -564,6 +584,20 @@ app.post("/twilio/call-status", async (req, res) => {
     // }
 
     const body = req.body || {};
+
+    // Misconfigured Telnyx Mission Control often points at this Twilio URL.
+    if (looksLikeTelnyxWebhookBody(body)) {
+        logger.warn(
+            "[Twilio] Telnyx event delivered to /twilio/call-status — forwarding to /telnyx/webhooks. Fix Mission Control webhook_event_url → https://dev-api.ondial.ai/telnyx/webhooks",
+            {
+                event_type: body.data?.event_type || body.event_type || null,
+                call_control_id: body.data?.payload?.call_control_id || null,
+                delivered_to: body.meta?.delivered_to || null,
+            }
+        );
+        return handleTelnyxWebhooks(req, res);
+    }
+
     logTwilioWebhookEvent(req, "[Twilio] Status webhook payload", body);
 
     const { CallSid, CallStatus, CallDuration, Timestamp } = body;
@@ -955,6 +989,21 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         }
     }
 
+    // Best approach: lifecycle in webhook; streaming/noise events are ack-only (HTTP already 200).
+    if (!shouldProcessTelnyxEventFully(eventType)) {
+        logger.info("[Telnyx] Informational event acknowledged (no heavy processing)", {
+            event_type: eventType || null,
+            event_id: eventId || null,
+            call_control_id: callControlId,
+        });
+        return {
+            outcome: "skip_informational",
+            event_type: eventType || null,
+            event_id: eventId || null,
+            call_control_id: callControlId,
+        };
+    }
+
     const telnyxMapping = await lookupTelnyxCallControlMapping(callControlId);
     const collectionName = await resolveOutboundCollection();
     const timestampIso = occurredAtIso || new Date().toISOString();
@@ -1006,6 +1055,17 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     if (duration != null) telnyxSetFields["telnyx.duration"] = duration;
     if (hangupCause) telnyxSetFields["telnyx.hangup_cause"] = hangupCause;
     if (hangupSource) telnyxSetFields["telnyx.hangup_source"] = hangupSource;
+    if (eventType === "call.cost") {
+        const billed = Number(payload?.billed_duration_secs ?? payload?.billable_duration_secs);
+        if (Number.isFinite(billed) && billed >= 0) {
+            telnyxSetFields["telnyx.billed_duration_secs"] = Math.floor(billed);
+            if (duration == null) telnyxSetFields["telnyx.duration"] = Math.floor(billed);
+        }
+        if (payload?.total_cost != null) {
+            telnyxSetFields["telnyx.total_cost"] = String(payload.total_cost);
+        }
+        if (payload?.status) telnyxSetFields["telnyx.cost_status"] = String(payload.status);
+    }
     if (status === "completed" || status === "busy" || status === "no-answer" || status === "failed" || status === "canceled") {
         telnyxSetFields["telnyx.completedAt"] = timestampIso;
     }
@@ -1118,7 +1178,7 @@ async function processTelnyxCallControlWebhook(parsed, body) {
 // ─── Telnyx Call Control webhooks (Mission Control webhook_event_url) ─────────
 // Docs: https://developers.telnyx.com/development/api-fundamentals/webhooks/receiving-webhooks
 // Must return 2xx within ~2s; heavy work runs after ack.
-app.post("/telnyx/webhooks", async (req, res) => {
+async function handleTelnyxWebhooks(req, res) {
     const body = req.body || {};
 
     if (isTelnyxSignatureRequired()) {
@@ -1155,6 +1215,7 @@ app.post("/telnyx/webhooks", async (req, res) => {
         received: true,
         event_type: parsed.eventType || null,
         event_id: parsed.eventId || null,
+        forwarded_from: req.originalUrl || req.url || null,
     });
 
     setImmediate(() => {
@@ -1195,7 +1256,9 @@ app.post("/telnyx/webhooks", async (req, res) => {
                 });
             });
     });
-});
+}
+
+app.post("/telnyx/webhooks", handleTelnyxWebhooks);
 
 /**
  * Hangup is a destructive control action: an unauthenticated caller who guesses or
@@ -1619,6 +1682,38 @@ async function handleTelnyxConversation(req, res) {
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
 // Receives: { CallSid?, call_id?, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
 async function handleTwilioConversation(req, res) {
+    const rawIn = req.body || {};
+    const maybeTelnyxId =
+        rawIn.call_control_id ||
+        rawIn.telnyx_call_control_id ||
+        rawIn.CallSid ||
+        rawIn.call_sid ||
+        rawIn.twilio_call_sid ||
+        null;
+    if (looksLikeTelnyxCarrierId(maybeTelnyxId) || rawIn.call_control_id || rawIn.telnyx_call_control_id) {
+        const ccid = normalizeTelnyxCallControlId(
+            rawIn.call_control_id || rawIn.telnyx_call_control_id || maybeTelnyxId
+        );
+        logger.warn(
+            "[Twilio] Telnyx conversation posted to /twilio/conversation — forwarding to Telnyx handler",
+            {
+                call_control_id: ccid,
+                call_unique_id: rawIn.call_unique_id || rawIn.call_id || null,
+                campaign_id: rawIn.campaign_id || null,
+                contact_id: rawIn.contact_id || null,
+            }
+        );
+        req.body = {
+            ...rawIn,
+            call_control_id: ccid,
+            telnyx_call_control_id: ccid,
+            call_id: rawIn.call_id || rawIn.call_unique_id || null,
+            call_unique_id: rawIn.call_unique_id || rawIn.call_id || null,
+            provider: "telnyx",
+        };
+        return handleTelnyxConversation(req, res);
+    }
+
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
         return res.status(404).json({
@@ -1638,6 +1733,15 @@ async function handleTwilioConversation(req, res) {
             missing: ["CallSid_or_call_id"],
             details: "Pass CallSid, or call_id / call_unique_id after mapping exists.",
         });
+    }
+    if (looksLikeTelnyxCarrierId(sid)) {
+        req.body = {
+            ...body,
+            call_control_id: sid,
+            provider: "telnyx",
+            call_id: body.call_id || body.call_unique_id || null,
+        };
+        return handleTelnyxConversation(req, res);
     }
 
     const normalizedConversation = normalizeTwilioConversationPayload(body);

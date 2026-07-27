@@ -9,6 +9,7 @@ const {
   preferTelnyxStatus,
   durationSecFromTelnyxPayload,
   isInformationalTelnyxEvent,
+  shouldProcessTelnyxEventFully,
   extractTelnyxRecordingUrl,
 } = require("../lib/telnyxWebhookParse");
 
@@ -76,6 +77,11 @@ assert.strictEqual(preferTelnyxStatus("in-progress", "completed"), "completed");
 
 assert.strictEqual(isInformationalTelnyxEvent("call.speak.ended"), true);
 assert.strictEqual(isInformationalTelnyxEvent("call.hangup"), false);
+assert.strictEqual(shouldProcessTelnyxEventFully("call.answered"), true);
+assert.strictEqual(shouldProcessTelnyxEventFully("call.hangup"), true);
+assert.strictEqual(shouldProcessTelnyxEventFully("call.cost"), true);
+assert.strictEqual(shouldProcessTelnyxEventFully("streaming.started"), false);
+assert.strictEqual(shouldProcessTelnyxEventFully("streaming.stopped"), false);
 
 {
   const dur = durationSecFromTelnyxPayload(
