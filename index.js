@@ -41,6 +41,7 @@ const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { pickNonEmpty } = require("./lib/customParameters");
 const { maybeDeductTwilioCallCredits } = require("./lib/twilioCallBilling");
 const { maybeDeductTelnyxCallCredits } = require("./lib/telnyxCallBilling");
+const { resolveTelnyxMappingWithFallbacks } = require("./lib/resolveTelnyxMappingFallback");
 const { hangupCallControl, isTelnyxConfigured } = require("./lib/telnyxClient");
 const { hangupTwilioCall, isTwilioConfigured } = require("./lib/twilioClient");
 const { resolveTelephonyProvider } = require("./lib/resolveTelephonyProvider");
@@ -1004,14 +1005,18 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         };
     }
 
-    const telnyxMapping = await lookupTelnyxCallControlMapping(callControlId);
     const collectionName = await resolveOutboundCollection();
+    const telnyxMapping = await resolveTelnyxMappingWithFallbacks({
+        callControlId,
+        to,
+        collectionName,
+    });
     const timestampIso = occurredAtIso || new Date().toISOString();
 
     const db = getDb();
     const existingDoc = await db.collection(collectionName).findOne(
         { "telnyx.call_control_id": callControlId },
-        { projection: { "telnyx.answeredAt": 1, "telnyx.status": 1, campaign_id: 1, contact_id: 1 } }
+        { projection: { "telnyx.answeredAt": 1, "telnyx.status": 1, campaign_id: 1, contact_id: 1, isTestCall: 1 } }
     );
 
     const mappedStatus = mapTelnyxEventToCallStatus(eventType, { hangupCause });
@@ -1074,7 +1079,11 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         telnyxSetFields.recordingUrl = recordingUrl;
         telnyxSetFields["telnyx.recordingUrl"] = recordingUrl;
     }
-    if (inferIsTestCallFromWebhookBody(body) || telnyxMapping?.is_test_call === true) {
+    if (
+        inferIsTestCallFromWebhookBody(body) ||
+        telnyxMapping?.is_test_call === true ||
+        existingDoc?.isTestCall === true
+    ) {
         telnyxSetFields.isTestCall = true;
     }
     if (deliveryAttempt != null) {

@@ -258,6 +258,65 @@ async function upsertTelnyxAnchoredCallLog({
         existing = await db.collection(collectionName).findOne(stubQuery, { sort: { createdAt: -1 } });
     }
 
+    // Race: Telnyx call.initiated often arrives before /api/telnyx-mapping and before
+    // outbound mapping Redis write. Match the wizard/test CallLogs shell by callee.
+    if (!existing) {
+        const toRaw =
+            telnyxSetFields?.["telnyx.to"] ||
+            telnyxSetFields?.to ||
+            rootFromMapping?.to ||
+            "";
+        const digits = String(toRaw || "").replace(/\D/g, "");
+        const ten =
+            digits.length === 12 && digits.startsWith("91")
+                ? digits.slice(2)
+                : digits.length === 11 && digits.startsWith("1")
+                  ? digits.slice(1)
+                  : digits.length === 10
+                    ? digits
+                    : "";
+        const variants = [...new Set([toRaw, digits, ten, ten && `91${ten}`, ten && `+91${ten}`, ten && `+${digits}`].filter(Boolean))];
+        if (variants.length) {
+            const since = new Date(Date.now() - 30 * 60 * 1000);
+            const sinceIso = since.toISOString();
+            existing = await db.collection(collectionName).findOne(
+                {
+                    $and: [
+                        {
+                            $or: [
+                                { to_number: { $in: variants } },
+                                { phone_number: { $in: variants } },
+                                { contact_phone: { $in: variants } },
+                            ],
+                        },
+                        {
+                            $or: [
+                                { createdAt: { $gte: since } },
+                                { createdAt: { $gte: sinceIso } },
+                                { updatedAt: { $gte: since } },
+                            ],
+                        },
+                        {
+                            $or: [
+                                { "telnyx.call_control_id": { $exists: false } },
+                                { "telnyx.call_control_id": null },
+                                { "telnyx.call_control_id": "" },
+                            ],
+                        },
+                    ],
+                },
+                { sort: { createdAt: -1 } }
+            );
+            if (existing) {
+                logger.info("[CallLog] Bound Telnyx event to recent dialer shell by to_number", {
+                    call_control_id: callControlId,
+                    dialer_lead_id: existing.lead_id || null,
+                    to: toRaw || null,
+                });
+            }
+        }
+    }
+
     const filter = existing ? { _id: existing._id } : { "telnyx.call_control_id": callControlId };
 
     const dialerId =
