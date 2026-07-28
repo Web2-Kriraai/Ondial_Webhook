@@ -42,6 +42,7 @@ const { pickNonEmpty } = require("./lib/customParameters");
 const { maybeDeductTwilioCallCredits } = require("./lib/twilioCallBilling");
 const { maybeDeductTelnyxCallCredits } = require("./lib/telnyxCallBilling");
 const { resolveTelnyxMappingWithFallbacks } = require("./lib/resolveTelnyxMappingFallback");
+const { logProviderApiHit } = require("./lib/providerApiLog");
 const { hangupCallControl, isTelnyxConfigured } = require("./lib/telnyxClient");
 const { hangupTwilioCall, isTwilioConfigured } = require("./lib/twilioClient");
 const { resolveTelephonyProvider } = require("./lib/resolveTelephonyProvider");
@@ -225,18 +226,27 @@ function extractTwilioCallSidFromBody(body) {
 
 /** Logs Twilio webhook as nested JSON object + pretty multi-line block in PM2 output. */
 function logTwilioWebhookEvent(req, label, body) {
-    const event = cloneJsonSafe(body);
-    const callSid = extractTwilioCallSidFromBody(body);
-    const envelope = {
-        method: req.method,
-        url: req.originalUrl,
-        ip: req.ip,
-        callSid,
-        event,
-    };
-
-    logger.info(label, envelope);
-    console.log(`\n${label}\n${formatJsonPretty(envelope)}\n`);
+    const lower = String(label || "").toLowerCase();
+    const api = lower.includes("conversation")
+        ? "conversation"
+        : lower.includes("mapping")
+          ? "mapping"
+          : "call-status";
+    const expectedRoute =
+        api === "conversation"
+            ? "/twilio/conversation"
+            : api === "mapping"
+              ? "/api/twilio-mapping"
+              : "/twilio/call-status";
+    logProviderApiHit(req, {
+        provider: "twilio",
+        api,
+        expectedRoute,
+        action: "received",
+        body,
+        logger,
+        extra: { label },
+    });
 }
 
 function logTwilioEventData(label, data) {
@@ -250,41 +260,40 @@ function logTwilioEventData(label, data) {
  * Avoids dumping huge turn text arrays at info — turnCount only unless DEBUG_WEBHOOK_PAYLOAD=1.
  */
 function logIngressEvent(req, label, body = {}, extra = {}) {
-    const safe = cloneJsonSafe(body) || {};
-    const turns = Array.isArray(safe.turns)
-        ? safe.turns
-        : Array.isArray(safe.conversation)
-          ? safe.conversation
-          : Array.isArray(safe.messages)
-            ? safe.messages
-            : null;
-    const turnCount = turns ? turns.length : null;
-    const dumpPayload =
-        String(process.env.DEBUG_WEBHOOK_PAYLOAD || "").trim() === "1" ||
-        String(process.env.DEBUG_WEBHOOK_PAYLOAD || "")
-            .trim()
-            .toLowerCase() === "true";
+    const providerGuess = String(label || "").toLowerCase().includes("telnyx")
+        ? "telnyx"
+        : String(label || "").toLowerCase().includes("twilio")
+          ? "twilio"
+          : "unknown";
+    const apiGuess = String(label || "").toLowerCase().includes("conversation")
+        ? "conversation"
+        : String(label || "").toLowerCase().includes("hangup")
+          ? "hangup"
+          : "webhooks";
+    const expected =
+        providerGuess === "telnyx"
+            ? apiGuess === "conversation"
+                ? "/telnyx/conversation"
+                : apiGuess === "hangup"
+                  ? "/telnyx/hangup"
+                  : "/telnyx/webhooks"
+            : providerGuess === "twilio"
+              ? apiGuess === "conversation"
+                  ? "/twilio/conversation"
+                  : apiGuess === "hangup"
+                    ? "/twilio/hangup"
+                    : "/twilio/call-status"
+              : null;
 
-    const envelope = {
-        method: req?.method || null,
-        url: req?.originalUrl || req?.url || null,
-        ip: req?.ip || null,
-        call_id: safe.call_id || safe.call_unique_id || safe.callUniqueId || null,
-        call_control_id:
-            safe.call_control_id || safe.telnyx_call_control_id || safe.callControlId || null,
-        CallSid: safe.CallSid || safe.call_sid || safe.twilio_call_sid || null,
-        campaign_id: safe.campaign_id || null,
-        contact_id: safe.contact_id || null,
-        provider: safe.provider || safe.telephony_provider || null,
-        turnCount,
-        ...extra,
-    };
-    if (dumpPayload) {
-        envelope.payload = safe;
-    }
-
-    logger.info(label, envelope);
-    console.log(`\n${label}\n${formatJsonPretty(envelope)}\n`);
+    logProviderApiHit(req, {
+        provider: providerGuess,
+        api: apiGuess,
+        expectedRoute: expected,
+        action: "received",
+        body,
+        logger,
+        extra: { label, ...extra },
+    });
 }
 
 /** True when Mission Control posted a Telnyx Voice API event (often mis-aimed at /twilio/call-status). */
@@ -588,18 +597,21 @@ app.post("/twilio/call-status", async (req, res) => {
 
     // Misconfigured Telnyx Mission Control often points at this Twilio URL.
     if (looksLikeTelnyxWebhookBody(body)) {
-        logger.warn(
-            "[Twilio] Telnyx event delivered to /twilio/call-status — forwarding to /telnyx/webhooks. Fix Mission Control webhook_event_url → https://dev-api.ondial.ai/telnyx/webhooks",
-            {
-                event_type: body.data?.event_type || body.event_type || null,
-                call_control_id: body.data?.payload?.call_control_id || null,
+        logProviderApiHit(req, {
+            provider: "telnyx",
+            api: "webhooks",
+            expectedRoute: "/telnyx/webhooks",
+            action: "forwarded",
+            body,
+            logger,
+            extra: {
+                reason: "telnyx_payload_on_twilio_route",
+                fix: "Mission Control webhook_event_url → https://dev-api.ondial.ai/telnyx/webhooks",
                 delivered_to: body.meta?.delivered_to || null,
-            }
-        );
+            },
+        });
         return handleTelnyxWebhooks(req, res);
     }
-
-    logTwilioWebhookEvent(req, "[Twilio] Status webhook payload", body);
 
     const { CallSid, CallStatus, CallDuration, Timestamp } = body;
     const missingFields = [];
@@ -607,6 +619,15 @@ app.post("/twilio/call-status", async (req, res) => {
     if (!CallStatus) missingFields.push("CallStatus");
     if (!Timestamp) missingFields.push("Timestamp");
     if (missingFields.length) {
+        logProviderApiHit(req, {
+            provider: "twilio",
+            api: "call-status",
+            expectedRoute: "/twilio/call-status",
+            action: "received",
+            body,
+            logger,
+            extra: { validation: "missing_required_fields", missing: missingFields },
+        });
         return res.status(400).json({
             received: false,
             error: "missing_required_fields",
@@ -645,6 +666,32 @@ app.post("/twilio/call-status", async (req, res) => {
 
     const normalizedCallSid = callSid;
     const twilioMapping = await lookupTwilioCallSidMapping(normalizedCallSid);
+    const isTestCall =
+        inferIsTestCallFromWebhookBody(body) || twilioMapping?.is_test_call === true;
+
+    logProviderApiHit(req, {
+        provider: "twilio",
+        api: "call-status",
+        expectedRoute: "/twilio/call-status",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            ...(isTestCall
+                ? {
+                      is_test_call: true,
+                      test_signal: twilioMapping?.is_test_call
+                          ? "twilio_mapping.is_test_call"
+                          : "body",
+                  }
+                : twilioMapping
+                  ? { is_test_call: false, test_signal: "twilio_mapping (normal)" }
+                  : { test_signal: "no_mapping_yet" }),
+            call_id: twilioMapping?.call_id || null,
+            campaign_id: twilioMapping?.campaign_id || body.campaign_id || null,
+            contact_id: twilioMapping?.contact_id || body.contact_id || null,
+        },
+    });
 
     const twilioSetFields = {
         "twilio.call_sid": normalizedCallSid,
@@ -658,7 +705,7 @@ app.post("/twilio/call-status", async (req, res) => {
     if (status.toLowerCase() === "completed") {
         twilioSetFields["twilio.completedAt"] = timestampValue.toISOString();
     }
-    if (inferIsTestCallFromWebhookBody(body) || twilioMapping?.is_test_call === true) {
+    if (isTestCall) {
         twilioSetFields.isTestCall = true;
     }
 
@@ -835,6 +882,24 @@ app.post("/api/telnyx-mapping", async (req, res) => {
         lead_id: leadIdStr || null,
         campaign_id: campaignId || null,
         contact_id: contactId || null,
+    });
+    logProviderApiHit(req, {
+        provider: "telnyx",
+        api: "mapping",
+        expectedRoute: "/api/telnyx-mapping",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            call_control_id: sid || null,
+            call_id: callIdNorm || null,
+            lead_id: leadIdStr || null,
+            is_test_call:
+                body.is_test_call === true ||
+                body.isTestCall === true ||
+                body.is_test_call === "true",
+            test_signal: "telnyx-mapping body",
+        },
     });
 
     if (!sid) {
@@ -1057,19 +1122,30 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     if (eventType === "call.answered") {
         telnyxSetFields["telnyx.answeredAt"] = timestampIso;
     }
-    if (duration != null) telnyxSetFields["telnyx.duration"] = duration;
     if (hangupCause) telnyxSetFields["telnyx.hangup_cause"] = hangupCause;
     if (hangupSource) telnyxSetFields["telnyx.hangup_source"] = hangupSource;
     if (eventType === "call.cost") {
+        // Carrier billing minute (often 60) — store separately; never use as talk-time UI duration.
         const billed = Number(payload?.billed_duration_secs ?? payload?.billable_duration_secs);
         if (Number.isFinite(billed) && billed >= 0) {
             telnyxSetFields["telnyx.billed_duration_secs"] = Math.floor(billed);
-            if (duration == null) telnyxSetFields["telnyx.duration"] = Math.floor(billed);
         }
         if (payload?.total_cost != null) {
             telnyxSetFields["telnyx.total_cost"] = String(payload.total_cost);
         }
         if (payload?.status) telnyxSetFields["telnyx.cost_status"] = String(payload.status);
+        const prevTalk = Number(existingDoc?.telnyx?.duration);
+        if (Number.isFinite(prevTalk) && prevTalk > 0) {
+            // Keep hangup talk time; call.cost must not overwrite with billed minutes.
+        } else if (answeredAtIso && timestampIso) {
+            const a = new Date(answeredAtIso).getTime();
+            const b = new Date(timestampIso).getTime();
+            if (Number.isFinite(a) && Number.isFinite(b) && b >= a) {
+                telnyxSetFields["telnyx.duration"] = Math.max(0, Math.floor((b - a) / 1000));
+            }
+        }
+    } else if (duration != null) {
+        telnyxSetFields["telnyx.duration"] = duration;
     }
     if (status === "completed" || status === "busy" || status === "no-answer" || status === "failed" || status === "canceled") {
         telnyxSetFields["telnyx.completedAt"] = timestampIso;
@@ -1168,6 +1244,11 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         event_id: eventId || null,
     });
 
+    const isTestCall =
+        inferIsTestCallFromWebhookBody(body) ||
+        telnyxMapping?.is_test_call === true ||
+        existingDoc?.isTestCall === true;
+
     return {
         outcome: "processed",
         event_type: eventType || null,
@@ -1179,6 +1260,8 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         status,
         duration: duration || 0,
         hangup_cause: hangupCause || null,
+        is_test_call: isTestCall,
+        call_kind: isTestCall ? "TEST" : "NORMAL",
         credit: creditResult,
         contactSync: contactSyncResult,
     };
@@ -1208,15 +1291,27 @@ async function handleTelnyxWebhooks(req, res) {
 
     const parsed = parseTelnyxWebhookBody(body);
 
-    logIngressEvent(req, "[Telnyx] Webhook received", body, {
-        event_type: parsed.eventType || null,
-        event_id: parsed.eventId || null,
-        call_control_id: parsed.callControlId || null,
-        attempt: parsed.deliveryAttempt,
-        direction: parsed.direction || null,
-        hangup_cause: parsed.hangupCause || null,
-        from: parsed.from || null,
-        to: parsed.to || null,
+    logProviderApiHit(req, {
+        provider: "telnyx",
+        api: "webhooks",
+        expectedRoute: "/telnyx/webhooks",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            event_type: parsed.eventType || null,
+            event_id: parsed.eventId || null,
+            call_control_id: parsed.callControlId || null,
+            attempt: parsed.deliveryAttempt,
+            direction: parsed.direction || null,
+            hangup_cause: parsed.hangupCause || null,
+            from: parsed.from || null,
+            to: parsed.to || null,
+            forwarded_from:
+                req.originalUrl && !String(req.originalUrl).includes("/telnyx/webhooks")
+                    ? req.originalUrl
+                    : null,
+        },
     });
 
     // Always ack immediately — Telnyx retries on non-2xx or >2s latency.
@@ -1231,6 +1326,8 @@ async function handleTelnyxWebhooks(req, res) {
         processTelnyxCallControlWebhook(parsed, body)
             .then((result) => {
                 logger.info("[Telnyx] Webhook processed", {
+                    call_kind: result?.call_kind || (result?.is_test_call ? "TEST" : "NORMAL"),
+                    is_test_call: result?.is_test_call === true,
                     outcome: result?.outcome || null,
                     event_type: result?.event_type || parsed.eventType || null,
                     event_id: result?.event_id || parsed.eventId || null,
@@ -1246,7 +1343,9 @@ async function handleTelnyxWebhooks(req, res) {
                 });
                 if (parsed.eventType === "call.hangup") {
                     console.log(
-                        `\n[Telnyx] call.hangup managed\n${formatJsonPretty({
+                        `\n[Telnyx][${result?.call_kind || "UNKNOWN"}] call.hangup managed\n${formatJsonPretty({
+                            call_kind: result?.call_kind || null,
+                            is_test_call: result?.is_test_call === true,
                             call_control_id: result?.call_control_id || parsed.callControlId,
                             call_id: result?.call_id || null,
                             status: result?.status || null,
@@ -1312,11 +1411,19 @@ async function handleTelnyxHangup(req, res) {
             details: "Pass call_control_id, or call_id / call_unique_id after mapping exists.",
         });
     }
-    logIngressEvent(req, "[Telnyx] Force hangup requested", body, {
-        call_control_id: callControlId,
-        call_id: enriched.dialerCallId || body.call_id || null,
-        resolved_from_call_id: enriched.resolved === true,
-        note: "Optional control API — normal ends use call.hangup → /telnyx/webhooks",
+    logProviderApiHit(req, {
+        provider: "telnyx",
+        api: "hangup",
+        expectedRoute: "/telnyx/hangup",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            call_control_id: callControlId,
+            call_id: enriched.dialerCallId || body.call_id || null,
+            resolved_from_call_id: enriched.resolved === true,
+            note: "Optional control API — normal ends use call.hangup → /telnyx/webhooks",
+        },
     });
     try {
         await hangupCallControl(callControlId);
@@ -1369,10 +1476,18 @@ async function handleTwilioHangup(req, res) {
             details: "Pass CallSid, or call_id / call_unique_id after mapping exists.",
         });
     }
-    logIngressEvent(req, "[Twilio] Force hangup requested", body, {
-        CallSid: callSid,
-        call_id: enriched.dialerCallId || body.call_id || null,
-        resolved_from_call_id: enriched.resolved === true,
+    logProviderApiHit(req, {
+        provider: "twilio",
+        api: "hangup",
+        expectedRoute: "/twilio/hangup",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            CallSid: callSid,
+            call_id: enriched.dialerCallId || body.call_id || null,
+            resolved_from_call_id: enriched.resolved === true,
+        },
     });
     try {
         await hangupTwilioCall(callSid);
@@ -1412,11 +1527,18 @@ async function handleCommonHangup(req, res) {
     }
     req.body = enriched.body;
     const provider = resolveTelephonyProvider(req.body || {});
-    logger.info("[Hangup] Common route", {
-        provider: provider || null,
-        call_id: enriched.dialerCallId || null,
-        resolved_from_call_id: enriched.resolved === true,
-        note: "Force hangup only — natural call end is call.hangup on /telnyx/webhooks",
+    logProviderApiHit(req, {
+        provider: provider || "unknown",
+        api: "hangup",
+        expectedRoute: "/hangup",
+        action: "routed",
+        body: req.body,
+        logger,
+        extra: {
+            call_id: enriched.dialerCallId || null,
+            resolved_from_call_id: enriched.resolved === true,
+            note: "Force hangup only — natural call end is call.hangup on /telnyx/webhooks",
+        },
     });
     if (provider === "telnyx") return handleTelnyxHangup(req, res);
     if (provider === "twilio") return handleTwilioHangup(req, res);
@@ -1446,9 +1568,17 @@ async function handleTelnyxConversation(req, res) {
         });
     }
     const body = enriched.body;
-    logIngressEvent(req, "[Telnyx] Conversation webhook payload", body, {
-        resolved_from_call_id: enriched.resolved === true,
-        dialer_call_id: enriched.dialerCallId || null,
+    logProviderApiHit(req, {
+        provider: "telnyx",
+        api: "conversation",
+        expectedRoute: "/telnyx/conversation",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            resolved_from_call_id: enriched.resolved === true,
+            dialer_call_id: enriched.dialerCallId || null,
+        },
     });
     const sid = normalizeTelnyxCallControlId(
         body.call_control_id || body.telnyx_call_control_id || body.callControlId
@@ -1708,15 +1838,18 @@ async function handleTwilioConversation(req, res) {
         const ccid = normalizeTelnyxCallControlId(
             rawIn.call_control_id || rawIn.telnyx_call_control_id || maybeTelnyxId
         );
-        logger.warn(
-            "[Twilio] Telnyx conversation posted to /twilio/conversation — forwarding to Telnyx handler",
-            {
+        logProviderApiHit(req, {
+            provider: "telnyx",
+            api: "conversation",
+            expectedRoute: "/telnyx/conversation",
+            action: "forwarded",
+            body: rawIn,
+            logger,
+            extra: {
+                reason: "telnyx_ids_on_twilio_conversation_route",
                 call_control_id: ccid,
-                call_unique_id: rawIn.call_unique_id || rawIn.call_id || null,
-                campaign_id: rawIn.campaign_id || null,
-                contact_id: rawIn.contact_id || null,
-            }
-        );
+            },
+        });
         req.body = {
             ...rawIn,
             call_control_id: ccid,
@@ -2240,6 +2373,17 @@ async function handlePoolConversation(req, res) {
  */
 async function handleCommonConversation(req, res) {
     const rawBody = req.body || {};
+    logProviderApiHit(req, {
+        provider: String(rawBody.provider || rawBody.telephony_provider || "unknown")
+            .trim()
+            .toLowerCase() || "unknown",
+        api: "conversation",
+        expectedRoute: "/conversation",
+        action: "routed",
+        body: rawBody,
+        logger,
+        extra: { note: "common conversation entry — will dispatch to pool/twilio/telnyx" },
+    });
     const explicit = String(rawBody.provider || rawBody.telephony_provider || "")
         .trim()
         .toLowerCase();

@@ -228,6 +228,66 @@ async function upsertTelnyxAnchoredCallLog({
     const syntheticLeadId = `telnyx:${callControlId}`;
     const now = new Date();
 
+    const isSyntheticTelnyxRow = (doc) => {
+        if (!doc) return false;
+        const lid = String(doc.lead_id || "");
+        const cid = String(doc.call_id || "");
+        return lid.startsWith("telnyx:") || cid.startsWith("v3:");
+    };
+
+    const findUnboundDialerShellByTo = async () => {
+        const toRaw =
+            telnyxSetFields?.["telnyx.to"] ||
+            telnyxSetFields?.to ||
+            rootFromMapping?.to ||
+            "";
+        const digits = String(toRaw || "").replace(/\D/g, "");
+        const ten =
+            digits.length === 12 && digits.startsWith("91")
+                ? digits.slice(2)
+                : digits.length === 11 && digits.startsWith("1")
+                  ? digits.slice(1)
+                  : digits.length === 10
+                    ? digits
+                    : "";
+        const variants = [
+            ...new Set(
+                [toRaw, digits, ten, ten && `91${ten}`, ten && `+91${ten}`, ten && `+${digits}`].filter(Boolean)
+            ),
+        ];
+        if (!variants.length) return null;
+        const since = new Date(Date.now() - 30 * 60 * 1000);
+        const sinceIso = since.toISOString();
+        const q = {
+            $and: [
+                {
+                    $or: [
+                        { to_number: { $in: variants } },
+                        { phone_number: { $in: variants } },
+                        { contact_phone: { $in: variants } },
+                    ],
+                },
+                {
+                    $or: [
+                        { createdAt: { $gte: since } },
+                        { createdAt: { $gte: sinceIso } },
+                        { updatedAt: { $gte: since } },
+                    ],
+                },
+                {
+                    $or: [
+                        { "telnyx.call_control_id": { $exists: false } },
+                        { "telnyx.call_control_id": null },
+                        { "telnyx.call_control_id": "" },
+                    ],
+                },
+            ],
+        };
+        if (campaignId) q.$and.push({ campaign_id: campaignId });
+        if (contactId) q.$and.push({ contact_id: contactId });
+        return db.collection(collectionName).findOne(q, { sort: { createdAt: -1 } });
+    };
+
     let existing =
         (await db.collection(collectionName).findOne({ "telnyx.call_control_id": callControlId })) ||
         null;
@@ -258,62 +318,24 @@ async function upsertTelnyxAnchoredCallLog({
         existing = await db.collection(collectionName).findOne(stubQuery, { sort: { createdAt: -1 } });
     }
 
-    // Race: Telnyx call.initiated often arrives before /api/telnyx-mapping and before
-    // outbound mapping Redis write. Match the wizard/test CallLogs shell by callee.
-    if (!existing) {
-        const toRaw =
-            telnyxSetFields?.["telnyx.to"] ||
-            telnyxSetFields?.to ||
-            rootFromMapping?.to ||
-            "";
-        const digits = String(toRaw || "").replace(/\D/g, "");
-        const ten =
-            digits.length === 12 && digits.startsWith("91")
-                ? digits.slice(2)
-                : digits.length === 11 && digits.startsWith("1")
-                  ? digits.slice(1)
-                  : digits.length === 10
-                    ? digits
-                    : "";
-        const variants = [...new Set([toRaw, digits, ten, ten && `91${ten}`, ten && `+91${ten}`, ten && `+${digits}`].filter(Boolean))];
-        if (variants.length) {
-            const since = new Date(Date.now() - 30 * 60 * 1000);
-            const sinceIso = since.toISOString();
-            existing = await db.collection(collectionName).findOne(
-                {
-                    $and: [
-                        {
-                            $or: [
-                                { to_number: { $in: variants } },
-                                { phone_number: { $in: variants } },
-                                { contact_phone: { $in: variants } },
-                            ],
-                        },
-                        {
-                            $or: [
-                                { createdAt: { $gte: since } },
-                                { createdAt: { $gte: sinceIso } },
-                                { updatedAt: { $gte: since } },
-                            ],
-                        },
-                        {
-                            $or: [
-                                { "telnyx.call_control_id": { $exists: false } },
-                                { "telnyx.call_control_id": null },
-                                { "telnyx.call_control_id": "" },
-                            ],
-                        },
-                    ],
-                },
-                { sort: { createdAt: -1 } }
-            );
-            if (existing) {
+    // Race: Telnyx call.initiated often arrives before mapping / dialer shell.
+    // Always prefer an unbound dialer UUID shell over a synthetic telnyx:v3 row.
+    const dialerShell = await findUnboundDialerShellByTo();
+    if (dialerShell) {
+        if (!existing || isSyntheticTelnyxRow(existing)) {
+            if (existing && String(existing._id) !== String(dialerShell._id)) {
+                logger.info("[CallLog] Prefer dialer shell over synthetic Telnyx row", {
+                    call_control_id: callControlId,
+                    dialer_id: dialerShell._id,
+                    synthetic_id: existing._id,
+                });
+            } else if (!existing) {
                 logger.info("[CallLog] Bound Telnyx event to recent dialer shell by to_number", {
                     call_control_id: callControlId,
-                    dialer_lead_id: existing.lead_id || null,
-                    to: toRaw || null,
+                    dialer_lead_id: dialerShell.lead_id || null,
                 });
             }
+            existing = dialerShell;
         }
     }
 
@@ -369,22 +391,39 @@ async function upsertTelnyxAnchoredCallLog({
             { upsert: true }
         );
 
-        // Drop orphan synthetic row if we just bound the dialer shell (or vice versa).
+        // Drop orphan synthetic / duplicate dialer rows for the same physical call.
         const keeperId = existing?._id || result.upsertedId;
-        if (keeperId && dialerId) {
+        if (keeperId) {
+            const orphanOr = [
+                { "telnyx.call_control_id": callControlId },
+                { lead_id: syntheticLeadId },
+                { call_id: callControlId },
+            ];
+            if (dialerId) {
+                orphanOr.push(
+                    { lead_id: dialerId },
+                    { call_id: dialerId },
+                    { call_unique_id: dialerId }
+                );
+            }
             const orphanFilter = {
                 _id: { $ne: keeperId },
-                $or: [
-                    { "telnyx.call_control_id": callControlId },
-                    { lead_id: syntheticLeadId },
-                    { call_id: callControlId },
-                ],
+                $or: orphanOr,
             };
             if (contactId) orphanFilter.contact_id = contactId;
             const orphans = await db
                 .collection(collectionName)
                 .find(orphanFilter)
-                .project({ _id: 1, call_data: 1, recordingUrl: 1, conversation: 1 })
+                .project({
+                    _id: 1,
+                    call_data: 1,
+                    recordingUrl: 1,
+                    conversation: 1,
+                    telnyx: 1,
+                    creditsDeducted: 1,
+                    creditsDeductedAmount: 1,
+                    isTestCall: 1,
+                })
                 .toArray();
             for (const orphan of orphans) {
                 const orphanEvents = Array.isArray(orphan.call_data?.events)
@@ -399,6 +438,16 @@ async function upsertTelnyxAnchoredCallLog({
                 const mergeSet = { updatedAt: now };
                 if (orphan.recordingUrl) mergeSet.recordingUrl = orphan.recordingUrl;
                 if (orphan.conversation) mergeSet.conversation = orphan.conversation;
+                if (orphan.telnyx && typeof orphan.telnyx === "object") {
+                    for (const [k, v] of Object.entries(orphan.telnyx)) {
+                        if (v != null && v !== "") mergeSet[`telnyx.${k}`] = v;
+                    }
+                }
+                if (orphan.creditsDeducted === true) mergeSet.creditsDeducted = true;
+                if (orphan.creditsDeductedAmount != null) {
+                    mergeSet.creditsDeductedAmount = orphan.creditsDeductedAmount;
+                }
+                if (orphan.isTestCall === true) mergeSet.isTestCall = true;
                 if (Object.keys(mergeSet).length > 1) {
                     await db.collection(collectionName).updateOne({ _id: keeperId }, { $set: mergeSet });
                 }
@@ -407,7 +456,7 @@ async function upsertTelnyxAnchoredCallLog({
                     keeperId: String(keeperId),
                     orphanId: String(orphan._id),
                     call_control_id: callControlId,
-                    dialerId,
+                    dialerId: dialerId || null,
                 });
             }
         }

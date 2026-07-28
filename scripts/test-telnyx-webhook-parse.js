@@ -94,6 +94,18 @@ assert.strictEqual(shouldProcessTelnyxEventFully("streaming.stopped"), false);
   assert.strictEqual(dur, 30);
 }
 
+// call.cost billed minute must NOT become talk duration
+{
+  const dur = durationSecFromTelnyxPayload(
+    {
+      billed_duration_secs: 60,
+      billable_duration_secs: 60,
+    },
+    "2020-01-01T00:00:10.000Z"
+  );
+  assert.strictEqual(dur, null);
+}
+
 assert.strictEqual(extractTelnyxRecordingUrl({
   recording_urls: { mp3: 'https://cdn.example.com/a.mp3' },
 }), 'https://cdn.example.com/a.mp3');
