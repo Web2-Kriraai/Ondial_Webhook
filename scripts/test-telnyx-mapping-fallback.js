@@ -72,6 +72,18 @@ check("phone map alone when no CallLog", () => {
     assert.ok(String(got.recovered_from).startsWith("outbound_phone_mapping"));
 });
 
+check("stale phone map alone is rejected (no wrong campaign attach)", () => {
+    const phone = {
+        call_id: "old-dialer-uuid",
+        lead_id: "old-dialer-uuid",
+        campaign_id: "campaign-old",
+        contact_id: "contact-old",
+        updatedAt: now - 300_000, // 5 min ago
+    };
+    const got = chooseRecoverySource(null, phone);
+    assert.strictEqual(got, null);
+});
+
 check("CallLog alone when no phone map", () => {
     const dialer = {
         call_unique_id: "only-dialer",
