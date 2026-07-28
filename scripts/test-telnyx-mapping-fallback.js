@@ -84,5 +84,30 @@ check("CallLog alone when no phone map", () => {
     assert.strictEqual(got.recovered_from, "recent_calllog");
 });
 
+check("completed dialer shell is ignored by pickFromDialerDoc", () => {
+    const { isTerminalDialerShell, chooseRecoverySource } = require("../lib/resolveTelnyxMappingFallback");
+    assert.strictEqual(
+        isTerminalDialerShell({ status: "completed", campaign_id: "c", contact_id: "x" }),
+        true
+    );
+    const got = chooseRecoverySource(
+        {
+            call_unique_id: "old",
+            campaign_id: "old-c",
+            contact_id: "old-ct",
+            status: "completed",
+            createdAt: new Date().toISOString(),
+        },
+        {
+            call_id: "fresh",
+            campaign_id: "new-c",
+            contact_id: "new-ct",
+            updatedAt: Date.now() - 1000,
+        }
+    );
+    assert.strictEqual(got.campaign_id, "new-c");
+    assert.strictEqual(got.recovered_from, "outbound_phone_mapping");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

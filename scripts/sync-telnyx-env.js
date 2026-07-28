@@ -106,10 +106,11 @@ function main() {
     process.exit(1);
   }
 
-  // Inventory notes (non-secret) discovered from Telnyx API 2026-07-25:
+  // Inventory notes (non-secret) discovered from Telnyx API 2026-07-25 / verified 2026-07-28:
   // Number +14078879770 (id 3008751214553728324) is on fax app Ondial-Yash
   // (3009498078286710470) — must be rebound to Call Control ondial-test.
-  // Call Control ondial-test webhook currently points at /twilio/call-status — wrong.
+  // Call Control ondial-test webhook_event_url must be {host}/telnyx/webhooks
+  // (fix with: node scripts/fix-telnyx-webhook-url.js).
 
   const ondialBlock = [
     "TELNYX_API_KEY=" + apiKey,

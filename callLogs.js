@@ -492,9 +492,10 @@ async function upsertTelnyxAnchoredCallLog({
 }
 
 /**
- * One MongoDB document per Twilio CallSid. lead_id is always `twilio:<CallSid>` so the same
- * contact_id / campaign can have many Twilio retries without colliding with the partial unique
- * index on CRM lead_id. Optional dialer ids are stored on twilio.external_* when provided.
+ * One MongoDB document per Twilio CallSid.
+ * Prefer the dialer UUID shell (test-predefined-call / worker) when known — same race as Telnyx:
+ * status often arrives before mapping, creating a synthetic `twilio:CA…` row; mapping then
+ * must fold that orphan into the dialer shell instead of leaving Initial + fake Retry in UI.
  */
 async function upsertTwilioAnchoredCallLog({
     collectionName,
@@ -504,7 +505,6 @@ async function upsertTwilioAnchoredCallLog({
     rootFromMapping,
 }) {
     const db = getDb();
-    const filter = { "twilio.call_sid": twilioCallSid };
     const campaignId = rootFromMapping.campaign_id != null ? String(rootFromMapping.campaign_id) : "";
     const contactId = rootFromMapping.contact_id != null ? String(rootFromMapping.contact_id) : "";
     const externalLead = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
@@ -514,18 +514,96 @@ async function upsertTwilioAnchoredCallLog({
     const syntheticLeadId = `twilio:${twilioCallSid}`;
     const now = new Date();
 
+    const isSyntheticTwilioRow = (doc) => {
+        if (!doc) return false;
+        const lead = String(doc.lead_id || "");
+        // Dialer shells keep a UUID lead_id; synthetic status-first rows use twilio:CA…
+        return lead === syntheticLeadId || lead.startsWith("twilio:");
+    };
+
+    let existing =
+        (await db.collection(collectionName).findOne({ "twilio.call_sid": twilioCallSid })) || null;
+
+    // Prefer dialer UUID shell (created by Ondial test call / outbound mapping) over synthetic.
+    if (externalCall && isUuidCallKey(externalCall)) {
+        const dialerShell = await db.collection(collectionName).findOne(
+            {
+                $or: [
+                    { lead_id: externalCall },
+                    { call_id: externalCall },
+                    { call_unique_id: externalCall },
+                    ...(externalLead && externalLead !== externalCall
+                        ? [{ lead_id: externalLead }, { call_id: externalLead }]
+                        : []),
+                ],
+            },
+            { sort: { createdAt: -1 } }
+        );
+        if (dialerShell && (!existing || isSyntheticTwilioRow(existing))) {
+            if (existing && String(existing._id) !== String(dialerShell._id)) {
+                logger.info("[CallLog] Prefer dialer shell over synthetic Twilio row", {
+                    twilio_call_sid: twilioCallSid,
+                    dialer_id: dialerShell._id,
+                    synthetic_id: existing._id,
+                });
+            }
+            existing = dialerShell;
+        }
+    }
+
+    // Same contact + campaign stub without twilio binding yet (race after test shell insert).
+    if (!existing && contactId && externalCall && isUuidCallKey(externalCall)) {
+        const stubQuery = {
+            contact_id: contactId,
+            $or: [{ lead_id: externalCall }, { call_id: externalCall }, { call_unique_id: externalCall }],
+            $and: [
+                {
+                    $or: [
+                        { "twilio.call_sid": { $exists: false } },
+                        { "twilio.call_sid": null },
+                        { "twilio.call_sid": "" },
+                    ],
+                },
+            ],
+        };
+        if (campaignId) stubQuery.campaign_id = campaignId;
+        existing = await db.collection(collectionName).findOne(stubQuery, { sort: { createdAt: -1 } });
+    }
+
+    const filter = existing ? { _id: existing._id } : { "twilio.call_sid": twilioCallSid };
+
+    const dialerId =
+        (externalCall && isUuidCallKey(externalCall) && externalCall) ||
+        (existing && isUuidCallKey(existing.lead_id) && String(existing.lead_id)) ||
+        (existing && isUuidCallKey(existing.call_id) && String(existing.call_id)) ||
+        (existing && isUuidCallKey(existing.call_unique_id) && String(existing.call_unique_id)) ||
+        "";
+
     const $set = {
         ...twilioSetFields,
         "twilio.call_sid": twilioCallSid,
-        lead_id: syntheticLeadId,
-        call_id: twilioCallSid,
         call_direction: "outbound",
         updatedAt: now,
+        provider_call_id: twilioCallSid,
     };
+
+    if (dialerId) {
+        $set.lead_id = dialerId;
+        $set.call_id = dialerId;
+        $set.call_unique_id = dialerId;
+        $set["twilio.external_call_id"] = dialerId;
+    } else {
+        $set.lead_id = syntheticLeadId;
+        $set.call_id = twilioCallSid;
+        if (externalCall) {
+            $set["twilio.external_call_id"] = externalCall;
+            $set.call_unique_id = externalCall;
+        }
+    }
+
     if (campaignId) $set.campaign_id = campaignId;
     if (contactId) $set.contact_id = contactId;
     if (externalLead) $set["twilio.external_lead_id"] = externalLead;
-    if (externalCall) $set["twilio.external_call_id"] = externalCall;
 
     const $setOnInsert = {
         createdAt: now,
@@ -545,11 +623,85 @@ async function upsertTwilioAnchoredCallLog({
             { upsert: true }
         );
 
+        // Drop orphan synthetic / duplicate dialer rows for the same physical call.
+        const keeperId = existing?._id || result.upsertedId;
+        if (keeperId) {
+            const orphanOr = [
+                { "twilio.call_sid": twilioCallSid },
+                { lead_id: syntheticLeadId },
+                { call_id: twilioCallSid },
+            ];
+            if (dialerId) {
+                orphanOr.push(
+                    { lead_id: dialerId },
+                    { call_id: dialerId },
+                    { call_unique_id: dialerId }
+                );
+            }
+            const orphanFilter = {
+                _id: { $ne: keeperId },
+                $or: orphanOr,
+            };
+            if (contactId) orphanFilter.contact_id = contactId;
+            const orphans = await db
+                .collection(collectionName)
+                .find(orphanFilter)
+                .project({
+                    _id: 1,
+                    call_data: 1,
+                    recordingUrl: 1,
+                    conversation: 1,
+                    twilio: 1,
+                    creditsDeducted: 1,
+                    creditsDeductedAmount: 1,
+                    isTestCall: 1,
+                    to_number: 1,
+                    contactName: 1,
+                })
+                .toArray();
+            for (const orphan of orphans) {
+                const orphanEvents = Array.isArray(orphan.call_data?.events)
+                    ? orphan.call_data.events
+                    : [];
+                if (orphanEvents.length) {
+                    await db.collection(collectionName).updateOne(
+                        { _id: keeperId },
+                        { $push: { "call_data.events": { $each: orphanEvents } } }
+                    );
+                }
+                const mergeSet = { updatedAt: now };
+                if (orphan.recordingUrl) mergeSet.recordingUrl = orphan.recordingUrl;
+                if (orphan.conversation) mergeSet.conversation = orphan.conversation;
+                if (orphan.to_number) mergeSet.to_number = orphan.to_number;
+                if (orphan.contactName) mergeSet.contactName = orphan.contactName;
+                if (orphan.twilio && typeof orphan.twilio === "object") {
+                    for (const [k, v] of Object.entries(orphan.twilio)) {
+                        if (v != null && v !== "") mergeSet[`twilio.${k}`] = v;
+                    }
+                }
+                if (orphan.creditsDeducted === true) mergeSet.creditsDeducted = true;
+                if (orphan.creditsDeductedAmount != null) {
+                    mergeSet.creditsDeductedAmount = orphan.creditsDeductedAmount;
+                }
+                if (orphan.isTestCall === true) mergeSet.isTestCall = true;
+                if (Object.keys(mergeSet).length > 1) {
+                    await db.collection(collectionName).updateOne({ _id: keeperId }, { $set: mergeSet });
+                }
+                await db.collection(collectionName).deleteOne({ _id: orphan._id });
+                logger.info("[CallLog] Merged/deleted orphan Twilio CallLog into dialer row", {
+                    keeperId: String(keeperId),
+                    orphanId: String(orphan._id),
+                    twilio_call_sid: twilioCallSid,
+                    dialerId: dialerId || null,
+                });
+            }
+        }
+
         return result.upsertedCount > 0 || result.modifiedCount > 0 || result.matchedCount > 0;
     } catch (err) {
         logger.error("[upsertTwilioAnchoredCallLog] Error during upsert", {
             error: err.message,
-            filter,
+            twilio_call_sid: twilioCallSid,
             collection: collectionName,
         });
         throw err;

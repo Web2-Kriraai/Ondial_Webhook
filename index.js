@@ -945,6 +945,10 @@ app.post("/api/telnyx-mapping", async (req, res) => {
         }
         if (inferIsTestCallFromWebhookBody(body) || body.is_test_call === true || body.isTestCall === true) {
             setPayload.isTestCall = true;
+        } else {
+            // Worker live dials omit is_test_call — clear any false TEST flag from a
+            // same-number CallLog recovery race with a prior wizard test.
+            setPayload.isTestCall = false;
         }
 
         const eventDoc = buildTelnyxStatusEvent({
@@ -1057,16 +1061,37 @@ async function processTelnyxCallControlWebhook(parsed, body) {
 
     // Best approach: lifecycle in webhook; streaming/noise events are ack-only (HTTP already 200).
     if (!shouldProcessTelnyxEventFully(eventType)) {
+        const collectionName = await resolveOutboundCollection();
+        const telnyxMapping = await resolveTelnyxMappingWithFallbacks({
+            callControlId,
+            to,
+            collectionName,
+        });
+        const isTest =
+            inferIsTestCallFromWebhookBody(body) || telnyxMapping?.is_test_call === true;
+        const callKind = isTest
+            ? "TEST"
+            : telnyxMapping?.call_id || telnyxMapping?.campaign_id
+              ? "NORMAL"
+              : "UNKNOWN";
         logger.info("[Telnyx] Informational event acknowledged (no heavy processing)", {
+            call_kind: callKind,
+            is_test_call: isTest || null,
             event_type: eventType || null,
             event_id: eventId || null,
             call_control_id: callControlId,
+            call_id: telnyxMapping?.call_id || null,
         });
         return {
             outcome: "skip_informational",
             event_type: eventType || null,
             event_id: eventId || null,
             call_control_id: callControlId,
+            call_id: telnyxMapping?.call_id || null,
+            campaign_id: telnyxMapping?.campaign_id || null,
+            contact_id: telnyxMapping?.contact_id || null,
+            is_test_call: isTest,
+            call_kind: callKind,
         };
     }
 
@@ -1157,9 +1182,13 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     }
     if (
         inferIsTestCallFromWebhookBody(body) ||
-        telnyxMapping?.is_test_call === true ||
-        existingDoc?.isTestCall === true
+        telnyxMapping?.is_test_call === true
     ) {
+        telnyxSetFields.isTestCall = true;
+    } else if (telnyxMapping?.call_id && telnyxMapping?.is_test_call !== true) {
+        // Worker mapping without test flag wins over a contaminated CallLog shell.
+        telnyxSetFields.isTestCall = false;
+    } else if (existingDoc?.isTestCall === true) {
         telnyxSetFields.isTestCall = true;
     }
     if (deliveryAttempt != null) {
@@ -1247,7 +1276,7 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     const isTestCall =
         inferIsTestCallFromWebhookBody(body) ||
         telnyxMapping?.is_test_call === true ||
-        existingDoc?.isTestCall === true;
+        (telnyxSetFields.isTestCall === true);
 
     return {
         outcome: "processed",
@@ -1326,8 +1355,21 @@ async function handleTelnyxWebhooks(req, res) {
         processTelnyxCallControlWebhook(parsed, body)
             .then((result) => {
                 logger.info("[Telnyx] Webhook processed", {
-                    call_kind: result?.call_kind || (result?.is_test_call ? "TEST" : "NORMAL"),
-                    is_test_call: result?.is_test_call === true,
+                    call_kind:
+                        result?.call_kind ||
+                        (result?.is_test_call === true
+                            ? "TEST"
+                            : result?.outcome === "skip_informational"
+                              ? "UNKNOWN"
+                              : result?.is_test_call === false
+                                ? "NORMAL"
+                                : "UNKNOWN"),
+                    is_test_call:
+                        result?.is_test_call === true
+                            ? true
+                            : result?.is_test_call === false
+                              ? false
+                              : null,
                     outcome: result?.outcome || null,
                     event_type: result?.event_type || parsed.eventType || null,
                     event_id: result?.event_id || parsed.eventId || null,
@@ -1568,6 +1610,12 @@ async function handleTelnyxConversation(req, res) {
         });
     }
     const body = enriched.body;
+    const sid = normalizeTelnyxCallControlId(
+        body.call_control_id || body.telnyx_call_control_id || body.callControlId
+    );
+    const earlyMapping = sid ? await lookupTelnyxCallControlMapping(sid) : null;
+    const isTestConv =
+        inferIsTestCallFromWebhookBody(body) || earlyMapping?.is_test_call === true;
     logProviderApiHit(req, {
         provider: "telnyx",
         api: "conversation",
@@ -1578,11 +1626,13 @@ async function handleTelnyxConversation(req, res) {
         extra: {
             resolved_from_call_id: enriched.resolved === true,
             dialer_call_id: enriched.dialerCallId || null,
+            ...(isTestConv
+                ? { is_test_call: true, test_signal: "mapping_or_body" }
+                : earlyMapping
+                  ? { is_test_call: false, test_signal: "telnyx_mapping (normal)" }
+                  : { test_signal: "no_mapping_flag" }),
         },
     });
-    const sid = normalizeTelnyxCallControlId(
-        body.call_control_id || body.telnyx_call_control_id || body.callControlId
-    );
     if (!sid) {
         logger.warn("[Telnyx] Conversation missing call_control_id / call_id", {
             body_keys: Object.keys(body || {}),
@@ -1604,7 +1654,7 @@ async function handleTelnyxConversation(req, res) {
         });
     }
 
-    const telnyxMapping = await lookupTelnyxCallControlMapping(sid);
+    const telnyxMapping = earlyMapping || (await lookupTelnyxCallControlMapping(sid));
     const eventDoc = {
         timestamp: new Date().toISOString(),
         event_type: "telnyx_conversation_upserted",
