@@ -51,6 +51,8 @@ async function ensureIndexes(database) {
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
     await ensureTwilioCallSidIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureTwilioCallSidIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
+    await ensureTelnyxCallControlIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
+    await ensureTelnyxCallControlIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
     await ensureInboundCallLogIndexByCallId(
         database,
         process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation"
@@ -270,5 +272,47 @@ async function ensureTwilioCallSidIndex(database, collectionName) {
             return;
         }
         logger.warn("[DB] twilio.call_sid index not created", { collectionName, error: msg });
+    }
+}
+
+/**
+ * Fast lookup for Telnyx webhooks under high concurrency.
+ * Sparse unique: only documents with telnyx.call_control_id participate.
+ * Required for carrier-primary upsert — without it concurrent inserts can create two docs.
+ */
+async function ensureTelnyxCallControlIdIndex(database, collectionName) {
+    const coll = database.collection(collectionName);
+    try {
+        await coll.createIndex(
+            { "telnyx.call_control_id": 1 },
+            {
+                name: "telnyx_call_control_id_unique_sparse",
+                unique: true,
+                sparse: true,
+            }
+        );
+        logger.info("[DB] Sparse unique index on telnyx.call_control_id ensured", { collectionName });
+    } catch (err) {
+        const msg = String(err.message || "");
+        if (
+            err.code === 11000 ||
+            /duplicate key/i.test(msg) ||
+            /E11000/i.test(msg) ||
+            /duplicate key value/i.test(msg)
+        ) {
+            logger.warn(
+                "[DB] Duplicate telnyx.call_control_id values; using non-unique sparse index",
+                { collectionName }
+            );
+            await coll.createIndex(
+                { "telnyx.call_control_id": 1 },
+                { name: "telnyx_call_control_id_sparse", sparse: true }
+            );
+            return;
+        }
+        if (err.code === 85 || /IndexOptionsConflict|already exists/i.test(msg)) {
+            return;
+        }
+        logger.warn("[DB] telnyx.call_control_id index not created", { collectionName, error: msg });
     }
 }
