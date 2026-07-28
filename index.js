@@ -1647,7 +1647,12 @@ async function handleTelnyxConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(dialerCallUniqueId || enriched.dialerCallId || sid).catch((err) => {
+    triggerCallAnalysis(dialerCallUniqueId || enriched.dialerCallId || sid, {
+        isTestCall:
+            storedDoc?.isTestCall === true ||
+            telnyxMapping?.is_test_call === true ||
+            inferIsTestCallFromWebhookBody(body),
+    }).catch((err) => {
         logger.warn("[Telnyx] Analysis trigger failed after conversation store", {
             call_control_id: sid,
             call_id: dialerCallUniqueId || enriched.dialerCallId || null,
@@ -1962,7 +1967,12 @@ async function handleTwilioConversation(req, res) {
     });
 
     // Best-effort analysis trigger for Twilio calls once conversation is available.
-    triggerCallAnalysis(sid).catch((err) => {
+    triggerCallAnalysis(sid, {
+        isTestCall:
+            storedDoc?.isTestCall === true ||
+            twilioMapping?.is_test_call === true ||
+            inferIsTestCallFromWebhookBody(body),
+    }).catch((err) => {
         logger.warn("[Twilio] Analysis trigger failed after conversation store", {
             CallSid: sid,
             error: err.message,
@@ -2182,7 +2192,12 @@ async function handlePoolConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(callKey).catch((err) => {
+    triggerCallAnalysis(callKey, {
+        isTestCall:
+            storedDoc?.isTestCall === true ||
+            mapping?.is_test_call === true ||
+            inferIsTestCallFromWebhookBody(body),
+    }).catch((err) => {
         logger.warn("[Pool] Analysis trigger failed after conversation store", {
             call_id: callKey,
             error: err.message,

@@ -206,7 +206,10 @@ async function mergeTelnyxStatusIntoCallLog(collectionName, filter, telnyxSetFie
 }
 
 /**
- * One MongoDB document per Telnyx call_control_id.
+ * Prefer one CallLog per Telnyx leg.
+ * When the dialer already created a row keyed by call_unique_id / UUID lead_id (test + production),
+ * attach `telnyx.call_control_id` to that row instead of inserting a second `telnyx:v3:…` doc.
+ * Carrier webhooks then update the same document (filter by call_control_id).
  */
 async function upsertTelnyxAnchoredCallLog({
     collectionName,
@@ -216,7 +219,6 @@ async function upsertTelnyxAnchoredCallLog({
     rootFromMapping,
 }) {
     const db = getDb();
-    const filter = { "telnyx.call_control_id": callControlId };
     const campaignId = rootFromMapping.campaign_id != null ? String(rootFromMapping.campaign_id) : "";
     const contactId = rootFromMapping.contact_id != null ? String(rootFromMapping.contact_id) : "";
     const externalLead = rootFromMapping.lead_id != null ? String(rootFromMapping.lead_id).trim() : "";
@@ -226,22 +228,71 @@ async function upsertTelnyxAnchoredCallLog({
     const syntheticLeadId = `telnyx:${callControlId}`;
     const now = new Date();
 
+    let existing =
+        (await db.collection(collectionName).findOne({ "telnyx.call_control_id": callControlId })) ||
+        null;
+
+    if (!existing && externalCall) {
+        existing = await db.collection(collectionName).findOne(
+            {
+                $or: [
+                    { lead_id: externalCall },
+                    { call_id: externalCall },
+                    { call_unique_id: externalCall },
+                    ...(externalLead && externalLead !== externalCall
+                        ? [{ lead_id: externalLead }, { call_id: externalLead }]
+                        : []),
+                ],
+            },
+            { sort: { createdAt: -1 } }
+        );
+    }
+
+    // Same contact + campaign dialer stub without telnyx binding yet (race after test shell insert).
+    if (!existing && contactId && externalCall) {
+        const stubQuery = {
+            contact_id: contactId,
+            $or: [{ lead_id: externalCall }, { call_id: externalCall }, { call_unique_id: externalCall }],
+        };
+        if (campaignId) stubQuery.campaign_id = campaignId;
+        existing = await db.collection(collectionName).findOne(stubQuery, { sort: { createdAt: -1 } });
+    }
+
+    const filter = existing ? { _id: existing._id } : { "telnyx.call_control_id": callControlId };
+
+    const dialerId =
+        (externalCall && isUuidCallKey(externalCall) && externalCall) ||
+        (existing && isUuidCallKey(existing.lead_id) && String(existing.lead_id)) ||
+        (existing && isUuidCallKey(existing.call_id) && String(existing.call_id)) ||
+        (existing && isUuidCallKey(existing.call_unique_id) && String(existing.call_unique_id)) ||
+        "";
+
     const $set = {
         ...telnyxSetFields,
         "telnyx.call_control_id": callControlId,
-        lead_id: syntheticLeadId,
-        call_id: callControlId,
         call_direction: "outbound",
         updatedAt: now,
+        provider_call_id: callControlId,
     };
+
+    if (dialerId) {
+        // Keep dialer UUID as the stable CallLogs identity (matches TestCall / credit billing key).
+        $set.lead_id = dialerId;
+        $set.call_id = dialerId;
+        $set.call_unique_id = dialerId;
+        $set["telnyx.external_call_id"] = dialerId;
+    } else {
+        $set.lead_id = syntheticLeadId;
+        $set.call_id = callControlId;
+        if (externalCall) {
+            $set["telnyx.external_call_id"] = externalCall;
+            $set.call_unique_id = externalCall;
+        }
+    }
+
     if (campaignId) $set.campaign_id = campaignId;
     if (contactId) $set.contact_id = contactId;
     if (externalLead) $set["telnyx.external_lead_id"] = externalLead;
-    if (externalCall) {
-        $set["telnyx.external_call_id"] = externalCall;
-        // Dialer call_unique_id for worker/analysis lookup (Twilio uses twilio.external_call_id the same way).
-        $set.call_unique_id = externalCall;
-    }
 
     const $setOnInsert = {
         createdAt: now,
@@ -258,6 +309,50 @@ async function upsertTelnyxAnchoredCallLog({
             },
             { upsert: true }
         );
+
+        // Drop orphan synthetic row if we just bound the dialer shell (or vice versa).
+        const keeperId = existing?._id || result.upsertedId;
+        if (keeperId && dialerId) {
+            const orphanFilter = {
+                _id: { $ne: keeperId },
+                $or: [
+                    { "telnyx.call_control_id": callControlId },
+                    { lead_id: syntheticLeadId },
+                    { call_id: callControlId },
+                ],
+            };
+            if (contactId) orphanFilter.contact_id = contactId;
+            const orphans = await db
+                .collection(collectionName)
+                .find(orphanFilter)
+                .project({ _id: 1, call_data: 1, recordingUrl: 1, conversation: 1 })
+                .toArray();
+            for (const orphan of orphans) {
+                const orphanEvents = Array.isArray(orphan.call_data?.events)
+                    ? orphan.call_data.events
+                    : [];
+                if (orphanEvents.length) {
+                    await db.collection(collectionName).updateOne(
+                        { _id: keeperId },
+                        { $push: { "call_data.events": { $each: orphanEvents } } }
+                    );
+                }
+                const mergeSet = { updatedAt: now };
+                if (orphan.recordingUrl) mergeSet.recordingUrl = orphan.recordingUrl;
+                if (orphan.conversation) mergeSet.conversation = orphan.conversation;
+                if (Object.keys(mergeSet).length > 1) {
+                    await db.collection(collectionName).updateOne({ _id: keeperId }, { $set: mergeSet });
+                }
+                await db.collection(collectionName).deleteOne({ _id: orphan._id });
+                logger.info("[CallLog] Merged/deleted orphan Telnyx CallLog into dialer row", {
+                    keeperId: String(keeperId),
+                    orphanId: String(orphan._id),
+                    call_control_id: callControlId,
+                    dialerId,
+                });
+            }
+        }
+
         return result;
     } catch (err) {
         // Path conflict if call_data missing on insert — retry with pipeline-style merge
