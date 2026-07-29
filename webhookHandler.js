@@ -39,6 +39,7 @@ const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleD
 const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
+const { buildCallReceiveStatusUpdateFilter, shouldBlockDowngradeFromFinal } = require("./lib/callReceiveStatusPolicy");
 
 /**
  * callReceiveStatus values:
@@ -67,16 +68,9 @@ async function updateByContactId(contactId, newStatus, context = "") {
         try {
             const db = getDb();
             const oid = new ObjectId(cid);
-            const shouldBlockDowngrade = newStatus !== 3;
-            const filter = shouldBlockDowngrade
-                ? {
-                    _id: oid,
-                    $or: [
-                        { callReceiveStatus: { $ne: 3 } },
-                        { status: { $ne: "completed" } }
-                    ]
-                }
-                : { _id: oid };
+                    // Monotonic contract: once a contact is marked as successfully completed
+                    // (callReceiveStatus === 3), never downgrade it for late / duplicate webhooks.
+                    const filter = buildCallReceiveStatusUpdateFilter({ oid, newStatus });
 
             console.log("[Webhook] updating callReceiveStatus", {
                 contact_id: cid,
@@ -101,14 +95,14 @@ async function updateByContactId(contactId, newStatus, context = "") {
                     { _id: oid },
                     { projection: { _id: 1, status: 1, callReceiveStatus: 1 } }
                 );
-                if (current?._id && shouldBlockDowngrade && String(current.status) === "completed" && Number(current.callReceiveStatus) === 3) {
-                    logger.warn(`[Webhook] Downgrade blocked for finalized contact_id=${cid} (${context})`, {
-                        attemptedStatus: newStatus,
-                        effectiveStatus: 3
-                    });
-                    return { applied: false, blocked: true, effectiveStatus: 3, contactId: cid };
-                }
-                logger.warn(`[Webhook] No contact found for contact_id=${cid} (${context})`);
+                        if (current?._id && shouldBlockDowngradeFromFinal(current.callReceiveStatus, newStatus)) {
+                            logger.warn(`[Webhook] Downgrade blocked for finalized contact_id=${cid} (${context})`, {
+                                attemptedStatus: newStatus,
+                                effectiveStatus: 3
+                            });
+                            return { applied: false, blocked: true, effectiveStatus: 3, contactId: cid };
+                        }
+                        logger.warn(`[Webhook] No contact matched downgrade filter for contact_id=${cid} (${context})`);
                 return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
             } else {
                 logger.info(`[Webhook] callReceiveStatus=${newStatus} for contact_id=${cid} (${context})`);
@@ -161,9 +155,7 @@ async function updateByMobile(mobileRaw, newStatus, context = "") {
         }
         const shouldBlockDowngrade = newStatus !== 3;
         if (
-            shouldBlockDowngrade &&
-            String(contact.status) === "completed" &&
-            Number(contact.callReceiveStatus) === 3
+            shouldBlockDowngrade && shouldBlockDowngradeFromFinal(contact.callReceiveStatus, newStatus)
         ) {
             logger.warn(`[Webhook] Downgrade blocked for finalized contact via mobile (${context})`, {
                 attemptedStatus: newStatus,
