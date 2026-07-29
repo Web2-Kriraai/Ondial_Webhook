@@ -33,7 +33,9 @@ const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
+const { enqueueMetaWhatsappInbound, closeMetaWhatsappInboundQueue } = require("./metaInboundQueue");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
+const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
@@ -2652,6 +2654,67 @@ app.post("/api/webhook/aisensy", async (req, res) => {
     processAisensyMarketingWebhookSafe(payload);
 });
 
+/**
+ * Meta Cloud API WhatsApp ingress (canonical public URL):
+ *   Live: https://api.ondial.ai/api/webhook/whatsapp
+ *   Test: https://dev-api.ondial.ai/api/webhook/whatsapp
+ * GET: hub.verify_token challenge. POST: X-Hub-Signature-256 → BullMQ whatsapp-meta-inbound.
+ */
+app.get("/api/webhook/whatsapp", (req, res) => {
+    const mode = String(req.query["hub.mode"] || "").trim();
+    const token = String(req.query["hub.verify_token"] || "").trim();
+    const challenge = req.query["hub.challenge"];
+    const expected = String(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "").trim();
+
+    if (mode !== "subscribe") {
+        return res.status(400).send("Invalid mode");
+    }
+    if (!expected) {
+        logger.error("[MetaWhatsApp] WHATSAPP_WEBHOOK_VERIFY_TOKEN is not configured");
+        return res.status(503).send("Webhook verify token not configured");
+    }
+    if (token !== expected) {
+        logger.error("[MetaWhatsApp] Verification FAILED (token mismatch; token not logged)");
+        return res.status(403).send("Forbidden");
+    }
+    logger.info("[MetaWhatsApp] Verification passed via env token");
+    return res.status(200).send(String(challenge ?? ""));
+});
+
+app.post("/api/webhook/whatsapp", async (req, res) => {
+    const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
+    if (!appSecret) {
+        logger.error("[MetaWhatsApp] WHATSAPP_APP_SECRET is not configured — rejecting POST");
+        return res.status(503).json({ error: "Webhook not configured" });
+    }
+
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const signature =
+        req.headers["x-hub-signature-256"] || req.headers["X-Hub-Signature-256"];
+
+    if (!verifyMetaWhatsappSignature(rawBody, signature, appSecret)) {
+        logger.error("[MetaWhatsApp] Invalid X-Hub-Signature-256");
+        return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const payload = req.body;
+    if (!payload || typeof payload !== "object") {
+        return res.status(400).json({ error: "Invalid JSON" });
+    }
+
+    try {
+        await enqueueMetaWhatsappInbound(payload, {
+            signaturePresent: Boolean(signature),
+            sourceIp: req.ip,
+        });
+    } catch (err) {
+        logger.error("[MetaWhatsApp] enqueue failed", { error: err.message });
+        return res.status(503).json({ error: "Queue unavailable", detail: err.message });
+    }
+
+    return res.status(200).json({ received: true });
+});
+
 app.get("/health", (req, res) => {
     res.json({ status: "ok", time: new Date().toISOString() });
 });
@@ -2706,6 +2769,7 @@ function setupShutdownHandlers() {
         try {
             await closeWebhookWorkers();
             await closeAisensyInboundQueue();
+            await closeMetaWhatsappInboundQueue();
         } catch (err) {
             logger.error("Error closing webhook workers", { error: err.message });
         } finally {
