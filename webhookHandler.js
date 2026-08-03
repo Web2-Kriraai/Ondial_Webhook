@@ -122,9 +122,13 @@ async function updateByContactId(contactId, newStatus, context = "") {
         }
     }
 
+    // direct_<session> (agent UI) is not a CRM ObjectId — caller should fall back to to-phone.
     logger.warn(`[Webhook] Skipping callReceiveStatus — contact_id is not an ObjectId`, {
         contactId: cid,
         context,
+        hint: cid.startsWith("direct_")
+            ? "agent_session_id — use destination phone fallback"
+            : "expected Mongo ObjectId or direct_<phone>",
     });
     return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
 }
@@ -238,13 +242,35 @@ async function processOutboundHangupBilling({
     if (!campaignIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
     }
+
+    // Always persist duration / recording / status on CallLogs — independent of credit outcome.
+    await finalizeOutboundCallLog({
+        callUniqueId: callUniqueForFinalize,
+        durationSec,
+        recordingUrl,
+        callStatus,
+    });
+
     if (!campaignIdForCredit) {
         logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
             call_id: callUniqueForFinalize,
             contact_id: effectiveContactId,
             hint: "Ensure worker POST /api/outbound-call-mapping or test-predefined CallLogs shell before webhooks",
         });
-        return;
+        await syncTestCallMirror({
+            callId: callUniqueForFinalize,
+            leadId: lead_id,
+            set: {
+                status: "completed",
+                ...(durationSec > 0
+                    ? { duration: durationSec, duration_ms: durationSec * 1000 }
+                    : {}),
+                ...(recordingUrl ? { recordingUrl: String(recordingUrl).trim() } : {}),
+                creditsDeducted: false,
+                creditDeductionError: "no_campaign_id",
+            },
+        });
+        return { outcome: "no_campaign_id" };
     }
 
     const creditResult = await tryDeductCampaignCallCredits({
@@ -256,39 +282,31 @@ async function processOutboundHangupBilling({
     logger.info("[Webhook] Outbound credit deduction", {
         call_id: callUniqueForFinalize,
         campaign_id: campaignIdForCredit,
+        contact_id: effectiveContactId || null,
         ...creditResult,
     });
 
-    if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
-        await finalizeOutboundCallLog({
-            callUniqueId: callUniqueForFinalize,
-            durationSec,
-            recordingUrl,
-            callStatus,
-        });
-        const mirror = { status: "completed", creditsDeducted: true };
-        if (durationSec > 0) {
-            mirror.duration = durationSec;
-            mirror.duration_ms = durationSec * 1000;
-        }
-        if (recordingUrl) mirror.recordingUrl = String(recordingUrl).trim();
-        if (creditResult.cost != null) mirror.creditsDeductedAmount = creditResult.cost;
-        await syncTestCallMirror({
-            callId: callUniqueForFinalize,
-            leadId: lead_id,
-            set: mirror,
-        });
-    } else if (creditResult.outcome !== "disabled") {
-        await syncTestCallMirror({
-            callId: callUniqueForFinalize,
-            leadId: lead_id,
-            set: {
-                status: "completed",
-                creditsDeducted: false,
-                creditDeductionError: creditResult.error || creditResult.outcome,
-            },
-        });
+    const billed =
+        creditResult.outcome === "deducted" || creditResult.outcome === "already_billed";
+    const mirror = {
+        status: "completed",
+        creditsDeducted: billed,
+        ...(durationSec > 0 ? { duration: durationSec, duration_ms: durationSec * 1000 } : {}),
+        ...(recordingUrl ? { recordingUrl: String(recordingUrl).trim() } : {}),
+    };
+    if (billed && creditResult.cost != null) {
+        mirror.creditsDeductedAmount = creditResult.cost;
+        mirror.creditDeductionError = null;
+    } else if (!billed && creditResult.outcome !== "disabled") {
+        mirror.creditDeductionError = creditResult.error || creditResult.outcome;
     }
+    await syncTestCallMirror({
+        callId: callUniqueForFinalize,
+        leadId: lead_id,
+        set: mirror,
+    });
+
+    return creditResult;
 }
 
 async function persistCallMappingFromIdentity(identity, phone) {
@@ -585,14 +603,31 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     const isInboundMapping = collectionName === INBOUNDCALLLOG_COLLECTION;
 
     if (contact_id) {
-        const updateResult = await updateByContactId(contact_id, newStatus, context);
-        const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
+        let updateResult = await updateByContactId(contact_id, newStatus, context);
+        // Agent UI session ids (direct_<hex>) cannot update contactprocessings — fall back to to-phone.
+        if (
+            !updateResult?.applied &&
+            !updateResult?.blocked &&
+            mobileRaw &&
+            !isInboundMapping &&
+            String(contact_id).startsWith("direct_") &&
+            !isDirectPhoneContactId(contact_id)
+        ) {
+            updateResult = await updateByMobile(
+                mobileRaw,
+                newStatus,
+                `${context} [direct_session_phone_fallback]`
+            );
+        }
+        const emittedStatus = Number.isFinite(updateResult?.effectiveStatus)
+            ? updateResult.effectiveStatus
+            : newStatus;
         emitCallUpdateSse({
             campaign_id: campaign_id || null,
             call_id: callId,
             contact_id,
             status: emittedStatus,
-            event: context || 'call_update',
+            event: context || "call_update",
         });
         return;
     }
@@ -825,6 +860,8 @@ async function handleEventWebhook(body) {
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
                 isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
+                toPhone: to || body?.to || null,
+                fromPhone: body?.from || null,
             });
         } else {
             logger.warn("[Webhook] Outbound event missing both lead_id and call_id — skipping append", { event });
@@ -1112,6 +1149,8 @@ async function handleSummaryWebhook(body) {
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
                 isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
+                toPhone: To_number || body?.To_number || body?.to || null,
+                fromPhone: body?.From_Number || body?.from || null,
             });
         } else {
             logger.warn("[Webhook] Outbound summary missing both lead_id and Call_UniqueId — skipping append");

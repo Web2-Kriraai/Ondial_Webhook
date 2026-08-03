@@ -2280,6 +2280,10 @@ async function handlePoolConversation(req, res) {
     };
     if (campaignId) setFields.campaign_id = campaignId;
     if (contactId) setFields.contact_id = contactId;
+    const toPhone = pickNonEmpty(body.to, body.to_number, body.To_number);
+    const fromPhone = pickNonEmpty(body.from, body.from_number, body.From_Number);
+    if (toPhone) setFields.to_number = toPhone;
+    if (fromPhone) setFields.from_number = fromPhone;
     if (inferIsTestCallFromWebhookBody(body) || mapping?.is_test_call === true) {
         setFields.isTestCall = true;
     }

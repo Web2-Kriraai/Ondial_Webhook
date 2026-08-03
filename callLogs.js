@@ -565,6 +565,12 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
                     $ifNull: ["$provider_call_id", String(options.providerCallId)],
                 };
             }
+            if (options.toPhone) {
+                identitySet.to_number = { $ifNull: ["$to_number", String(options.toPhone)] };
+            }
+            if (options.fromPhone) {
+                identitySet.from_number = { $ifNull: ["$from_number", String(options.fromPhone)] };
+            }
             if (options.isTestCall === true) {
                 identitySet.isTestCall = { $literal: true };
             }
