@@ -724,7 +724,11 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
         const normTo = toPhone ? normalizePhone(toPhone) : null;
 
         return slice.some((e) => {
-            if (String(e?.event_type || "").toLowerCase() !== "call_answered") return false;
+            const ty = String(e?.event_type || "").toLowerCase();
+            // Transfer implies the A-leg was already answered and bridged to a human.
+            if (ty !== "call_answered" && ty !== "call_transfer" && ty !== "call.transfer") {
+                return false;
+            }
             if (eventCallIdFromPayload(e) === normalized) return true;
             if (normTo && normalizePhone(e?.data?.to) === normTo) return true;
             return false;
@@ -739,6 +743,53 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
 
 function hasLeadId(v) {
     return v != null && String(v).trim() !== "";
+}
+
+/**
+ * Persist transfer summary on CallLog root for UI/query (events still hold full payload).
+ * Does not finalize the call — transfer is mid-lifecycle.
+ */
+async function persistTransferMetaOnCallLog({
+    leadId,
+    callId,
+    collectionName,
+    transferTarget,
+    transferAt,
+    legs,
+    markTransferred = true,
+}) {
+    const key = String(leadId || callId || "").trim();
+    if (!key) return;
+
+    const set = { updatedAt: new Date() };
+    if (markTransferred) {
+        set["call_data.transfer"] = {
+            transferred: true,
+            transferTarget: transferTarget ? String(transferTarget) : null,
+            transferAt: transferAt ? String(transferAt) : new Date().toISOString(),
+        };
+    } else if (transferTarget) {
+        set["call_data.transfer.transferTarget"] = String(transferTarget);
+        if (transferAt) set["call_data.transfer.transferAt"] = String(transferAt);
+    }
+    if (Array.isArray(legs) && legs.length > 0) {
+        set["call_data.legs"] = legs;
+    }
+    if (Object.keys(set).length <= 1) return;
+
+    try {
+        const db = getDb();
+        const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
+        const filter = isInbound
+            ? { call_id: key }
+            : { $or: [{ lead_id: key }, { call_unique_id: key }, { call_id: key }] };
+        await db.collection(collectionName || CALLLOGS_COLLECTION).updateOne(filter, { $set: set });
+    } catch (err) {
+        logger.warn(`[Webhook] persistTransferMetaOnCallLog failed: ${err.message}`, {
+            leadId: key,
+            transferTarget: transferTarget || null,
+        });
+    }
 }
 
 async function handleEventWebhook(body) {
@@ -895,6 +946,35 @@ async function handleEventWebhook(body) {
             await updateStatus(call_id, to, 2, event, identity);
             break;
 
+        case "call_transfer": {
+            // Mid-call bot→human handoff. Call is still live — do NOT finalize or bill.
+            // Keep callReceiveStatus at answered/running (2); credit runs on call_hangup.
+            await markCallAnswered(call_id, to);
+            await updateStatus(call_id, to, 2, event, identity);
+            await persistTransferMetaOnCallLog({
+                leadId: lead_id || docKey,
+                callId: call_id,
+                collectionName,
+                transferTarget: body?.transferTarget || null,
+                transferAt: body?.transferAt || null,
+                legs: body?.legs,
+            });
+            emitCallUpdateSse({
+                campaign_id: identity.campaign_id || null,
+                call_id,
+                contact_id: contact_id || null,
+                status: 2,
+                event: "call_transfer",
+                transferTarget: body?.transferTarget || null,
+                transferAt: body?.transferAt || null,
+            });
+            logger.info(
+                `[Webhook] call_transfer recorded for call_id=${call_id}` +
+                    (body?.transferTarget ? ` → ${body.transferTarget}` : "")
+            );
+            break;
+        }
+
         case "call_hangup": {
             const dur = parseInt(duration, 10) || 0;
 
@@ -933,6 +1013,19 @@ async function handleEventWebhook(body) {
                 `${event} duration=${dur}s ${statusSource}`,
                 identity
             );
+
+            // Persist multi-leg summary when provider includes legs (post-transfer completed).
+            if (Array.isArray(body?.legs) && body.legs.length > 0) {
+                await persistTransferMetaOnCallLog({
+                    leadId: lead_id || docKey,
+                    callId: call_id,
+                    collectionName,
+                    transferTarget: body?.transferTarget || null,
+                    transferAt: body?.transferAt || null,
+                    legs: body.legs,
+                    markTransferred: false,
+                });
+            }
 
             if (!isInboundLog && hangupStatus === 3 && dur > 0) {
                 const callUniqueForFinalize = identity.normalizedCallId || call_id;
@@ -1182,11 +1275,11 @@ async function handleSummaryWebhook(body) {
 //
 // New telephony provider sends nested payloads with custom event names:
 //   {
-//     event: "call.initiated" | "call.ringing" | "call.answered" | "call.completed" | "call.failed",
+//     event: "call.initiated" | "call.ringing" | "call.answered" | "call.transfer" | "call.completed" | "call.failed",
 //     call: {
 //       id, direction, from, to, status, callStatus, hangupCause,
 //       startedAt, ringingAt, answeredAt, endedAt,
-//       ringDurationSec, durationSec,
+//       ringDurationSec, durationSec, transferTarget?, transferAt?,
 //       customParameters: { contact_id, campaign_id, call_unique_id, lead_id? }
 //     },
 //     legs: [...]
@@ -1195,13 +1288,14 @@ async function handleSummaryWebhook(body) {
 // We convert it once at the router boundary to the legacy flat shape:
 //   { event: "call_initiated"|..., call_id, to, from, duration, contact_id,
 //     campaign_id, call_unique_id, lead_id, callStatus, answered, direction,
-//     recordingUrl, _raw }
+//     recordingUrl, transferTarget, transferAt, legs, _raw }
 //
 // Legacy payloads (already flat) pass through untouched.
 const NEW_EVENT_MAP = {
     "call.initiated": "call_initiated",
     "call.ringing": "call_ringing",
     "call.answered": "call_answered",
+    "call.transfer": "call_transfer",
     "call.ended": "call_ended",
     "call.completed": "call_hangup",
     "call.failed": "call_failed",
@@ -1255,6 +1349,11 @@ function normalizeWebhookPayload(body) {
 
     const normEvent = NEW_EVENT_MAP[body.event] || body.event;
     const durationSec = deriveDurationSec(c);
+    const transferTarget =
+        pickNonEmpty(c.transferTarget, c.transfer_target, c.transferNumber, c.transfer_number) ||
+        null;
+    const transferAt = pickNonEmpty(c.transferAt, c.transfer_at) || null;
+    const legs = Array.isArray(body.legs) ? body.legs : undefined;
 
     return {
         event: normEvent,
@@ -1268,10 +1367,13 @@ function normalizeWebhookPayload(body) {
         lead_id: pickNonEmpty(cp.lead_id, callUniqueId),
         provider_call_id: providerCallId,
         callStatus: c.callStatus || null,
-        answered: c.answeredAt != null,
+        answered: c.answeredAt != null || normEvent === "call_transfer",
         direction: c.direction || null,
         call_type: body.call_type || c.call_type || null,
         recordingUrl: c.recordingUrl || c.recordingURL || c.recording_url || null,
+        transferTarget,
+        transferAt,
+        ...(legs ? { legs } : {}),
         _raw: body,
     };
 }
