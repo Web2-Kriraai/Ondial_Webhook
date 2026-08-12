@@ -40,6 +40,7 @@ const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 const { buildCallReceiveStatusUpdateFilter, shouldBlockDowngradeFromFinal } = require("./lib/callReceiveStatusPolicy");
+const { notifyTenantCallStatus } = require("./lib/notifyTenantCallStatus");
 
 /**
  * callReceiveStatus values:
@@ -106,6 +107,28 @@ async function updateByContactId(contactId, newStatus, context = "") {
                 return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
             } else {
                 logger.info(`[Webhook] callReceiveStatus=${newStatus} for contact_id=${cid} (${context})`);
+                try {
+                    const doc = await db.collection("contactprocessings").findOne(
+                        { _id: oid },
+                        { projection: { createdBy: 1, userId: 1, campaignId: 1 } }
+                    );
+                    let userId = doc?.userId || null;
+                    if (!userId && doc?.createdBy && String(doc.createdBy).includes("@")) {
+                        const user = await db.collection("users").findOne(
+                            { email: new RegExp(`^${String(doc.createdBy).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+                            { projection: { _id: 1 } }
+                        );
+                        userId = user?._id || null;
+                    } else if (!userId && doc?.createdBy && isMongoObjectIdString(String(doc.createdBy))) {
+                        userId = doc.createdBy;
+                    }
+                    void notifyTenantCallStatus({
+                        contactId: cid,
+                        userId,
+                        callReceiveStatus: newStatus,
+                        campaignId: doc?.campaignId,
+                    });
+                } catch (_) { /* non-fatal */ }
                 return { applied: true, blocked: false, effectiveStatus: newStatus, contactId: cid };
             }
         } catch (err) {
