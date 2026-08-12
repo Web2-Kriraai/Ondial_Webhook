@@ -38,6 +38,7 @@ const { isInboundWebhook } = require("./lib/inboundCall");
 const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync } = require("./lib/inboundDocAnchor");
 const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
+const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 const { buildCallReceiveStatusUpdateFilter, shouldBlockDowngradeFromFinal } = require("./lib/callReceiveStatusPolicy");
 
@@ -780,10 +781,19 @@ async function persistTransferMetaOnCallLog({
     try {
         const db = getDb();
         const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
-        const filter = isInbound
-            ? { call_id: key }
-            : { $or: [{ lead_id: key }, { call_unique_id: key }, { call_id: key }] };
-        await db.collection(collectionName || CALLLOGS_COLLECTION).updateOne(filter, { $set: set });
+        const coll = db.collection(collectionName || CALLLOGS_COLLECTION);
+        if (isInbound) {
+            await coll.updateOne({ call_id: key }, { $set: set });
+        } else {
+            // Resolve via indexed sequential finds, then update by _id (no 3-way $or COLLSCAN).
+            const doc = await findOneCallLogByIdentity(coll, key, {
+                includeCarrier: false,
+                limitPerQuery: 1,
+            });
+            if (doc?._id) {
+                await coll.updateOne({ _id: doc._id }, { $set: set });
+            }
+        }
     } catch (err) {
         logger.warn(`[Webhook] persistTransferMetaOnCallLog failed: ${err.message}`, {
             leadId: key,
