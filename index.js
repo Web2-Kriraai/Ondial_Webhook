@@ -33,7 +33,11 @@ const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
-const { enqueueMetaWhatsappInbound, closeMetaWhatsappInboundQueue } = require("./metaInboundQueue");
+const {
+    enqueueMetaWhatsappInbound,
+    closeMetaWhatsappInboundQueue,
+    getMetaWhatsappInboundQueueHealth,
+} = require("./metaInboundQueue");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
 const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
@@ -2691,7 +2695,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     if (!payload || typeof payload !== "object") {
         return res.status(400).json({ error: "Invalid JSON" });
     }
+    if (payload.object !== "whatsapp_business_account") {
+        return res.status(400).json({ error: "Unsupported webhook object" });
+    }
 
+    // Enqueue before ACK so Redis/BullMQ failures are not silently dropped after 200.
+    // Meta retries on non-2xx; stable jobId coalesces those retries.
     try {
         await enqueueMetaWhatsappInbound(payload, {
             signaturePresent: Boolean(signature),
@@ -2711,11 +2720,15 @@ app.get("/health", (req, res) => {
 
 app.get("/health/slo", async (req, res) => {
     try {
-        const queue = await getQueueLagSnapshot();
+        const [queue, metaWhatsapp] = await Promise.all([
+            getQueueLagSnapshot(),
+            getMetaWhatsappInboundQueueHealth(),
+        ]);
         return res.json({
             status: "ok",
             time: new Date().toISOString(),
             webhookQueue: queue,
+            metaWhatsapp,
         });
     } catch (error) {
         return res.status(500).json({

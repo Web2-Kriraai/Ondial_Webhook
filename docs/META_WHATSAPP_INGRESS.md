@@ -13,8 +13,14 @@ Subscribe to `messages` (and optionally message status fields).
 1. **GET** — Meta hub verification: `hub.mode=subscribe`, `hub.verify_token`, `hub.challenge`
    - Token must match `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (required; no hardcoded default)
 2. **POST** — Verify `X-Hub-Signature-256` with `WHATSAPP_APP_SECRET` (fail closed)
-3. Return `200 { received: true }` after enqueue
+3. Reject payloads whose `object` is not `whatsapp_business_account`
 4. Enqueue payload to BullMQ `whatsapp-meta-inbound` (consumed by Calling_system1)
+5. Return `200 { received: true }` **only after** `await Queue.add` succeeds (Redis has acknowledged the job write). Queue/Redis failures return `503` so Meta retries — events are never ACKed then dropped.
+
+Webhook job IDs are derived from the full payload hash. Meta retry deliveries are therefore coalesced while
+the completed job is retained (one hour), preventing duplicate AI replies.
+
+**Ordering invariant (do not regress):** `await enqueueMetaWhatsappInbound` → on throw `503` → else `200`. Same pattern as AiSensy ingress. `/health/slo` queue counts detect backlog after successful enqueue; they are complementary, not a substitute for this ACK contract.
 
 ## Env
 
@@ -26,6 +32,19 @@ Subscribe to `messages` (and optionally message status fields).
 | `REDIS_URL` | Same Redis as Calling_system1 BullMQ consumer |
 
 Outbound Meta sends use `WHATSAPP_API_TOKEN` / phone number ID on **Calling_system1** and Ondial — not this service.
+Calling_system1 also handles Meta `sent`, `delivered`, `read`, and `failed` status events from this queue.
+
+## Failure behaviour
+
+| Condition | Response |
+|-----------|----------|
+| Missing `WHATSAPP_APP_SECRET` | `503` — fail closed |
+| Invalid signature | `401` |
+| `object` ≠ `whatsapp_business_account` | `400` |
+| Redis / BullMQ enqueue failure | `503 Queue unavailable` — Meta retries; event is **not** ACKed with 200 |
+| Success | `200 { received: true }` after enqueue |
+
+See Ondial `docs/WHATSAPP_META_HOW_IT_WORKS.md` §5.1 for production gaps (window closed, credits, observability).
 
 ## AiSensy sibling
 

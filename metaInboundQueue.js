@@ -26,7 +26,9 @@ function hashPayload(payload) {
  */
 async function enqueueMetaWhatsappInbound(payload, meta = {}) {
     const q = getQueue();
-    const jobId = `meta-wa-${hashPayload(payload)}-${Date.now().toString(36)}`;
+    // Meta retries the exact same delivery when it does not receive a 2xx response.
+    // Keep the id stable so BullMQ coalesces those retries while the completed job is retained.
+    const jobId = `meta-wa-${hashPayload(payload)}`;
     try {
         await q.add(
             "whatsapp-meta-inbound",
@@ -63,8 +65,18 @@ async function closeMetaWhatsappInboundQueue() {
     }
 }
 
+async function getMetaWhatsappInboundQueueHealth() {
+    const q = getQueue();
+    const counts = await q.getJobCounts("waiting", "active", "delayed", "failed");
+    return {
+        queueName: QUEUE_NAME,
+        ...counts,
+    };
+}
+
 module.exports = {
     enqueueMetaWhatsappInbound,
     closeMetaWhatsappInboundQueue,
+    getMetaWhatsappInboundQueueHealth,
     WHATSAPP_META_INBOUND_QUEUE_NAME: QUEUE_NAME,
 };
