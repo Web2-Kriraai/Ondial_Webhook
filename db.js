@@ -39,7 +39,7 @@ module.exports = { connectDB, getDb };
 
 async function ensureIndexes(database) {
     await Promise.all([
-        database.collection("contactprocessings").createIndex({ mobileNumber: 1 }),
+        // Do not recreate bare mobileNumber_1 — Atlas redundant vs mobileNumber+campaignId compound (~58MB).
         database.collection("contactprocessings").createIndex({ updatedAt: -1 }),
         database.collection("contactprocessings").createIndex({ lead_id: 1, campaign_id: 1 }),
         database.collection(process.env.ERRORLOG_COLLECTION || "ErrorLog").createIndex({ createdAt: -1 }),
@@ -49,6 +49,8 @@ async function ensureIndexes(database) {
     ]);
     await ensureCallLogsLeadIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureCallLogsLeadIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
+    await ensureCallLogsCallUniqueIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
+    await ensureCallLogsCallUniqueIdIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
     await ensureTwilioCallSidIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
     await ensureTwilioCallSidIndex(database, process.env.TESTCALL_COLLECTION || "TestCall");
     await ensureTelnyxCallControlIdIndex(database, process.env.CALLLOGS_COLLECTION || "CallLogs");
@@ -57,6 +59,38 @@ async function ensureIndexes(database) {
         database,
         process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation"
     );
+}
+
+/**
+ * Atlas Query Targeting fix: dialer UUID lookups hit call_unique_id with no index
+ * (~50k docs scanned → 1 returned). Partial nonempty string index matches lead_id pattern.
+ * Non-unique by default (stub+CDR pairs can share the same dialer UUID).
+ */
+async function ensureCallLogsCallUniqueIdIndex(database, collectionName) {
+    const coll = database.collection(collectionName);
+    try {
+        await coll.createIndex(
+            { call_unique_id: 1 },
+            {
+                name: "calllogs_call_unique_id",
+                background: true,
+                partialFilterExpression: {
+                    call_unique_id: {
+                        $type: "string",
+                        $gt: "",
+                    },
+                },
+            }
+        );
+        logger.info("[DB] Partial index on call_unique_id ensured", { collectionName });
+    } catch (err) {
+        const msg = String(err.message || "");
+        if (err.code === 85 || err.code === 86 || /IndexOptionsConflict|already exists/i.test(msg)) {
+            logger.info("[DB] call_unique_id index already present", { message: msg, collectionName });
+            return;
+        }
+        logger.warn("[DB] call_unique_id index not created", { collectionName, error: msg });
+    }
 }
 
 /**

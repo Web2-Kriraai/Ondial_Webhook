@@ -38,6 +38,7 @@ const { isInboundWebhook } = require("./lib/inboundCall");
 const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync } = require("./lib/inboundDocAnchor");
 const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
+const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 const { buildCallReceiveStatusUpdateFilter, shouldBlockDowngradeFromFinal } = require("./lib/callReceiveStatusPolicy");
 
@@ -122,9 +123,13 @@ async function updateByContactId(contactId, newStatus, context = "") {
         }
     }
 
+    // direct_<session> (agent UI) is not a CRM ObjectId — caller should fall back to to-phone.
     logger.warn(`[Webhook] Skipping callReceiveStatus — contact_id is not an ObjectId`, {
         contactId: cid,
         context,
+        hint: cid.startsWith("direct_")
+            ? "agent_session_id — use destination phone fallback"
+            : "expected Mongo ObjectId or direct_<phone>",
     });
     return { applied: false, blocked: false, effectiveStatus: null, contactId: cid };
 }
@@ -238,13 +243,35 @@ async function processOutboundHangupBilling({
     if (!campaignIdForCredit && effectiveContactId) {
         campaignIdForCredit = await resolveCampaignIdFromContact(effectiveContactId);
     }
+
+    // Always persist duration / recording / status on CallLogs — independent of credit outcome.
+    await finalizeOutboundCallLog({
+        callUniqueId: callUniqueForFinalize,
+        durationSec,
+        recordingUrl,
+        callStatus,
+    });
+
     if (!campaignIdForCredit) {
         logger.warn("[Webhook] Skipping credit deduction — campaign_id unresolved", {
             call_id: callUniqueForFinalize,
             contact_id: effectiveContactId,
             hint: "Ensure worker POST /api/outbound-call-mapping or test-predefined CallLogs shell before webhooks",
         });
-        return;
+        await syncTestCallMirror({
+            callId: callUniqueForFinalize,
+            leadId: lead_id,
+            set: {
+                status: "completed",
+                ...(durationSec > 0
+                    ? { duration: durationSec, duration_ms: durationSec * 1000 }
+                    : {}),
+                ...(recordingUrl ? { recordingUrl: String(recordingUrl).trim() } : {}),
+                creditsDeducted: false,
+                creditDeductionError: "no_campaign_id",
+            },
+        });
+        return { outcome: "no_campaign_id" };
     }
 
     const creditResult = await tryDeductCampaignCallCredits({
@@ -256,39 +283,31 @@ async function processOutboundHangupBilling({
     logger.info("[Webhook] Outbound credit deduction", {
         call_id: callUniqueForFinalize,
         campaign_id: campaignIdForCredit,
+        contact_id: effectiveContactId || null,
         ...creditResult,
     });
 
-    if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
-        await finalizeOutboundCallLog({
-            callUniqueId: callUniqueForFinalize,
-            durationSec,
-            recordingUrl,
-            callStatus,
-        });
-        const mirror = { status: "completed", creditsDeducted: true };
-        if (durationSec > 0) {
-            mirror.duration = durationSec;
-            mirror.duration_ms = durationSec * 1000;
-        }
-        if (recordingUrl) mirror.recordingUrl = String(recordingUrl).trim();
-        if (creditResult.cost != null) mirror.creditsDeductedAmount = creditResult.cost;
-        await syncTestCallMirror({
-            callId: callUniqueForFinalize,
-            leadId: lead_id,
-            set: mirror,
-        });
-    } else if (creditResult.outcome !== "disabled") {
-        await syncTestCallMirror({
-            callId: callUniqueForFinalize,
-            leadId: lead_id,
-            set: {
-                status: "completed",
-                creditsDeducted: false,
-                creditDeductionError: creditResult.error || creditResult.outcome,
-            },
-        });
+    const billed =
+        creditResult.outcome === "deducted" || creditResult.outcome === "already_billed";
+    const mirror = {
+        status: "completed",
+        creditsDeducted: billed,
+        ...(durationSec > 0 ? { duration: durationSec, duration_ms: durationSec * 1000 } : {}),
+        ...(recordingUrl ? { recordingUrl: String(recordingUrl).trim() } : {}),
+    };
+    if (billed && creditResult.cost != null) {
+        mirror.creditsDeductedAmount = creditResult.cost;
+        mirror.creditDeductionError = null;
+    } else if (!billed && creditResult.outcome !== "disabled") {
+        mirror.creditDeductionError = creditResult.error || creditResult.outcome;
     }
+    await syncTestCallMirror({
+        callId: callUniqueForFinalize,
+        leadId: lead_id,
+        set: mirror,
+    });
+
+    return creditResult;
 }
 
 async function persistCallMappingFromIdentity(identity, phone) {
@@ -585,14 +604,31 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     const isInboundMapping = collectionName === INBOUNDCALLLOG_COLLECTION;
 
     if (contact_id) {
-        const updateResult = await updateByContactId(contact_id, newStatus, context);
-        const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
+        let updateResult = await updateByContactId(contact_id, newStatus, context);
+        // Agent UI session ids (direct_<hex>) cannot update contactprocessings — fall back to to-phone.
+        if (
+            !updateResult?.applied &&
+            !updateResult?.blocked &&
+            mobileRaw &&
+            !isInboundMapping &&
+            String(contact_id).startsWith("direct_") &&
+            !isDirectPhoneContactId(contact_id)
+        ) {
+            updateResult = await updateByMobile(
+                mobileRaw,
+                newStatus,
+                `${context} [direct_session_phone_fallback]`
+            );
+        }
+        const emittedStatus = Number.isFinite(updateResult?.effectiveStatus)
+            ? updateResult.effectiveStatus
+            : newStatus;
         emitCallUpdateSse({
             campaign_id: campaign_id || null,
             call_id: callId,
             contact_id,
             status: emittedStatus,
-            event: context || 'call_update',
+            event: context || "call_update",
         });
         return;
     }
@@ -689,7 +725,11 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
         const normTo = toPhone ? normalizePhone(toPhone) : null;
 
         return slice.some((e) => {
-            if (String(e?.event_type || "").toLowerCase() !== "call_answered") return false;
+            const ty = String(e?.event_type || "").toLowerCase();
+            // Transfer implies the A-leg was already answered and bridged to a human.
+            if (ty !== "call_answered" && ty !== "call_transfer" && ty !== "call.transfer") {
+                return false;
+            }
             if (eventCallIdFromPayload(e) === normalized) return true;
             if (normTo && normalizePhone(e?.data?.to) === normTo) return true;
             return false;
@@ -704,6 +744,62 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
 
 function hasLeadId(v) {
     return v != null && String(v).trim() !== "";
+}
+
+/**
+ * Persist transfer summary on CallLog root for UI/query (events still hold full payload).
+ * Does not finalize the call — transfer is mid-lifecycle.
+ */
+async function persistTransferMetaOnCallLog({
+    leadId,
+    callId,
+    collectionName,
+    transferTarget,
+    transferAt,
+    legs,
+    markTransferred = true,
+}) {
+    const key = String(leadId || callId || "").trim();
+    if (!key) return;
+
+    const set = { updatedAt: new Date() };
+    if (markTransferred) {
+        set["call_data.transfer"] = {
+            transferred: true,
+            transferTarget: transferTarget ? String(transferTarget) : null,
+            transferAt: transferAt ? String(transferAt) : new Date().toISOString(),
+        };
+    } else if (transferTarget) {
+        set["call_data.transfer.transferTarget"] = String(transferTarget);
+        if (transferAt) set["call_data.transfer.transferAt"] = String(transferAt);
+    }
+    if (Array.isArray(legs) && legs.length > 0) {
+        set["call_data.legs"] = legs;
+    }
+    if (Object.keys(set).length <= 1) return;
+
+    try {
+        const db = getDb();
+        const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
+        const coll = db.collection(collectionName || CALLLOGS_COLLECTION);
+        if (isInbound) {
+            await coll.updateOne({ call_id: key }, { $set: set });
+        } else {
+            // Resolve via indexed sequential finds, then update by _id (no 3-way $or COLLSCAN).
+            const doc = await findOneCallLogByIdentity(coll, key, {
+                includeCarrier: false,
+                limitPerQuery: 1,
+            });
+            if (doc?._id) {
+                await coll.updateOne({ _id: doc._id }, { $set: set });
+            }
+        }
+    } catch (err) {
+        logger.warn(`[Webhook] persistTransferMetaOnCallLog failed: ${err.message}`, {
+            leadId: key,
+            transferTarget: transferTarget || null,
+        });
+    }
 }
 
 async function handleEventWebhook(body) {
@@ -825,6 +921,8 @@ async function handleEventWebhook(body) {
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
                 isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
+                toPhone: to || body?.to || null,
+                fromPhone: body?.from || null,
             });
         } else {
             logger.warn("[Webhook] Outbound event missing both lead_id and call_id — skipping append", { event });
@@ -857,6 +955,35 @@ async function handleEventWebhook(body) {
             await markCallAnswered(call_id, to);
             await updateStatus(call_id, to, 2, event, identity);
             break;
+
+        case "call_transfer": {
+            // Mid-call bot→human handoff. Call is still live — do NOT finalize or bill.
+            // Keep callReceiveStatus at answered/running (2); credit runs on call_hangup.
+            await markCallAnswered(call_id, to);
+            await updateStatus(call_id, to, 2, event, identity);
+            await persistTransferMetaOnCallLog({
+                leadId: lead_id || docKey,
+                callId: call_id,
+                collectionName,
+                transferTarget: body?.transferTarget || null,
+                transferAt: body?.transferAt || null,
+                legs: body?.legs,
+            });
+            emitCallUpdateSse({
+                campaign_id: identity.campaign_id || null,
+                call_id,
+                contact_id: contact_id || null,
+                status: 2,
+                event: "call_transfer",
+                transferTarget: body?.transferTarget || null,
+                transferAt: body?.transferAt || null,
+            });
+            logger.info(
+                `[Webhook] call_transfer recorded for call_id=${call_id}` +
+                    (body?.transferTarget ? ` → ${body.transferTarget}` : "")
+            );
+            break;
+        }
 
         case "call_hangup": {
             const dur = parseInt(duration, 10) || 0;
@@ -896,6 +1023,19 @@ async function handleEventWebhook(body) {
                 `${event} duration=${dur}s ${statusSource}`,
                 identity
             );
+
+            // Persist multi-leg summary when provider includes legs (post-transfer completed).
+            if (Array.isArray(body?.legs) && body.legs.length > 0) {
+                await persistTransferMetaOnCallLog({
+                    leadId: lead_id || docKey,
+                    callId: call_id,
+                    collectionName,
+                    transferTarget: body?.transferTarget || null,
+                    transferAt: body?.transferAt || null,
+                    legs: body.legs,
+                    markTransferred: false,
+                });
+            }
 
             if (!isInboundLog && hangupStatus === 3 && dur > 0) {
                 const callUniqueForFinalize = identity.normalizedCallId || call_id;
@@ -1112,6 +1252,8 @@ async function handleSummaryWebhook(body) {
                 providerCallId: identity.providerCallId || body?.provider_call_id,
                 collectionName,
                 isTestCall: inferIsTestCallFromWebhookBody(body) || mappedTest,
+                toPhone: To_number || body?.To_number || body?.to || null,
+                fromPhone: body?.From_Number || body?.from || null,
             });
         } else {
             logger.warn("[Webhook] Outbound summary missing both lead_id and Call_UniqueId — skipping append");
@@ -1143,11 +1285,11 @@ async function handleSummaryWebhook(body) {
 //
 // New telephony provider sends nested payloads with custom event names:
 //   {
-//     event: "call.initiated" | "call.ringing" | "call.answered" | "call.completed" | "call.failed",
+//     event: "call.initiated" | "call.ringing" | "call.answered" | "call.transfer" | "call.completed" | "call.failed",
 //     call: {
 //       id, direction, from, to, status, callStatus, hangupCause,
 //       startedAt, ringingAt, answeredAt, endedAt,
-//       ringDurationSec, durationSec,
+//       ringDurationSec, durationSec, transferTarget?, transferAt?,
 //       customParameters: { contact_id, campaign_id, call_unique_id, lead_id? }
 //     },
 //     legs: [...]
@@ -1156,13 +1298,14 @@ async function handleSummaryWebhook(body) {
 // We convert it once at the router boundary to the legacy flat shape:
 //   { event: "call_initiated"|..., call_id, to, from, duration, contact_id,
 //     campaign_id, call_unique_id, lead_id, callStatus, answered, direction,
-//     recordingUrl, _raw }
+//     recordingUrl, transferTarget, transferAt, legs, _raw }
 //
 // Legacy payloads (already flat) pass through untouched.
 const NEW_EVENT_MAP = {
     "call.initiated": "call_initiated",
     "call.ringing": "call_ringing",
     "call.answered": "call_answered",
+    "call.transfer": "call_transfer",
     "call.ended": "call_ended",
     "call.completed": "call_hangup",
     "call.failed": "call_failed",
@@ -1216,6 +1359,11 @@ function normalizeWebhookPayload(body) {
 
     const normEvent = NEW_EVENT_MAP[body.event] || body.event;
     const durationSec = deriveDurationSec(c);
+    const transferTarget =
+        pickNonEmpty(c.transferTarget, c.transfer_target, c.transferNumber, c.transfer_number) ||
+        null;
+    const transferAt = pickNonEmpty(c.transferAt, c.transfer_at) || null;
+    const legs = Array.isArray(body.legs) ? body.legs : undefined;
 
     return {
         event: normEvent,
@@ -1229,10 +1377,13 @@ function normalizeWebhookPayload(body) {
         lead_id: pickNonEmpty(cp.lead_id, callUniqueId),
         provider_call_id: providerCallId,
         callStatus: c.callStatus || null,
-        answered: c.answeredAt != null,
+        answered: c.answeredAt != null || normEvent === "call_transfer",
         direction: c.direction || null,
         call_type: body.call_type || c.call_type || null,
         recordingUrl: c.recordingUrl || c.recordingURL || c.recording_url || null,
+        transferTarget,
+        transferAt,
+        ...(legs ? { legs } : {}),
         _raw: body,
     };
 }

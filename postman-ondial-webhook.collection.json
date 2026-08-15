@@ -354,7 +354,24 @@
               "raw": "{\n  \"event\": \"call.answered\",\n  \"call\": {\n    \"id\": \"{{callUniqueId}}\",\n    \"from\": \"{{fromNumber}}\",\n    \"to\": \"{{toNumber}}\",\n    \"direction\": \"outbound\",\n    \"answeredAt\": \"2026-07-25T06:29:08.000Z\"\n  },\n  \"customParameters\": {\n    \"campaign_id\": \"{{campaignId}}\",\n    \"contact_id\": \"{{contactId}}\",\n    \"call_unique_id\": \"{{callUniqueId}}\"\n  },\n  \"campaign_id\": \"{{campaignId}}\",\n  \"contact_id\": \"{{contactId}}\",\n  \"call_unique_id\": \"{{callUniqueId}}\"\n}"
             },
             "url": "{{baseUrl}}/api/v1/webhooks/receiver",
-            "description": "Enqueued to BullMQ. Events: call.initiated | ringing | answered | completed | failed."
+            "description": "Enqueued to BullMQ. Events: call.initiated | ringing | answered | transfer | completed | failed."
+          },
+          "response": []
+        },
+        {
+          "name": "Event — call.transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-event-id", "value": "evt-pool-transfer-001" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"call.transfer\",\n  \"timestamp\": \"2026-07-25T06:29:30.000Z\",\n  \"call\": {\n    \"id\": \"{{callUniqueId}}\",\n    \"from\": \"{{fromNumber}}\",\n    \"to\": \"{{toNumber}}\",\n    \"direction\": \"outbound\",\n    \"callType\": \"bot\",\n    \"status\": \"answered\",\n    \"answeredAt\": \"2026-07-25T06:29:08.000Z\",\n    \"transferTarget\": \"919876543210\",\n    \"transferAt\": \"2026-07-25T06:29:30.000Z\",\n    \"customParameters\": {\n      \"campaign_id\": \"{{campaignId}}\",\n      \"contact_id\": \"{{contactId}}\",\n      \"call_unique_id\": \"{{callUniqueId}}\"\n    }\n  }\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/webhooks/receiver",
+            "description": "Mid-call bot→human transfer. Keeps callReceiveStatus=2 (running); does not bill. Billing still on call.completed."
           },
           "response": []
         },

@@ -54,6 +54,7 @@ const {
     pickDialerCallId,
     hasCarrierId,
 } = require("./lib/resolveCarrierFromCallId");
+const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
 const {
     mapTwilioCallStatusToReceiveStatus,
     resolveTwilioContactId,
@@ -2282,6 +2283,10 @@ async function handlePoolConversation(req, res) {
     };
     if (campaignId) setFields.campaign_id = campaignId;
     if (contactId) setFields.contact_id = contactId;
+    const toPhone = pickNonEmpty(body.to, body.to_number, body.To_number);
+    const fromPhone = pickNonEmpty(body.from, body.from_number, body.From_Number);
+    if (toPhone) setFields.to_number = toPhone;
+    if (fromPhone) setFields.from_number = fromPhone;
     if (inferIsTestCallFromWebhookBody(body) || mapping?.is_test_call === true) {
         setFields.isTestCall = true;
     }
@@ -2355,25 +2360,10 @@ async function handlePoolConversation(req, res) {
         matchedCollection = primaryCollection;
     }
 
-    const storedDoc = await db.collection(matchedCollection).findOne(
-        {
-            $or: [
-                { call_unique_id: callKey },
-                { lead_id: callKey },
-                { call_id: callKey },
-            ],
-        },
-        {
-            projection: {
-                _id: 1,
-                campaign_id: 1,
-                contact_id: 1,
-                call_id: 1,
-                call_unique_id: 1,
-                "conversation.turns": 1,
-                isTestCall: 1,
-            },
-        }
+    const storedDoc = await findOneCallLogByIdentity(
+        db.collection(matchedCollection),
+        callKey,
+        { includeCarrier: false, limitPerQuery: 1 }
     );
 
     emitCallUpdateSse({

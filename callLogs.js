@@ -2,6 +2,7 @@ const { getDb } = require("./db");
 const { normalizeCallId } = require("./callMapping");
 const logger = require("./logger");
 const { upsertCarrierAnchoredCallLog, isUuidCallKey } = require("./lib/foreignCallLogUpsert");
+const { mergeOutboundDuplicateCallLogs } = require("./lib/mergeOutboundDuplicateCallLogs");
 
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const TESTCALL_COLLECTION = process.env.TESTCALL_COLLECTION || "TestCall";
@@ -422,6 +423,19 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
             if (!isDuplicateKeyError(err)) throw err;
         }
 
+        try {
+            await mergeOutboundDuplicateCallLogs(db.collection(collectionName), {
+                leadId: lead_id,
+                callId: call_id || lead_id,
+                callUniqueId: lead_id,
+            });
+        } catch (mergeErr) {
+            logger.warn("[CallLog] merge after createCallLog failed", {
+                error: mergeErr.message,
+                lead_id,
+            });
+        }
+
         logger.info(`[CallLog] Created log for lead_id=${lead_id} → contact_id=${contact_id}`);
     } catch (err) {
         logger.error(`[CallLog] createCallLog failed: ${err.message}`, { lead_id, call_id });
@@ -557,13 +571,21 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             if (options.campaign_id) {
                 identitySet.campaign_id = { $ifNull: ["$campaign_id", String(options.campaign_id)] };
             }
-            if (options.callId) {
-                identitySet.call_id = { $ifNull: ["$call_id", String(options.callId)] };
-            }
+            // Always persist call_id for outbound (prefer explicit callId, else lead_id)
+            // so dial identity stays consistent across concurrent webhook events.
+            identitySet.call_id = {
+                $ifNull: ["$call_id", String(options.callId || outboundLeadId)],
+            };
             if (options.providerCallId) {
                 identitySet.provider_call_id = {
                     $ifNull: ["$provider_call_id", String(options.providerCallId)],
                 };
+            }
+            if (options.toPhone) {
+                identitySet.to_number = { $ifNull: ["$to_number", String(options.toPhone)] };
+            }
+            if (options.fromPhone) {
+                identitySet.from_number = { $ifNull: ["$from_number", String(options.fromPhone)] };
             }
             if (options.isTestCall === true) {
                 identitySet.isTestCall = { $literal: true };
@@ -582,11 +604,8 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             pipeline.push({ $set: { recordingUrl } });
         }
 
-        const result = await updateOneWithUpsertRaceRetry(
-            db.collection(resolvedCollectionName),
-            docFilter,
-            pipeline
-        );
+        const coll = db.collection(resolvedCollectionName);
+        const result = await updateOneWithUpsertRaceRetry(coll, docFilter, pipeline);
 
         if (result.upsertedCount > 0) {
             logger.info(`[CallLog] Created doc and stored event '${event_type}' for ${logLabel}`);
@@ -596,6 +615,23 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
             logger.warn(
                 `[CallLog] appendCallEvent matched but did not modify (${logLabel}, event=${event_type})`
             );
+        }
+
+        // Heal concurrent upsert races (same dial, two docs) before UI ranks attempts.
+        if (!inbound) {
+            const outboundLeadId = docFilter.lead_id;
+            try {
+                await mergeOutboundDuplicateCallLogs(coll, {
+                    leadId: outboundLeadId,
+                    callId: options.callId || outboundLeadId,
+                    callUniqueId: options.callUniqueId || outboundLeadId,
+                });
+            } catch (mergeErr) {
+                logger.warn("[CallLog] mergeOutboundDuplicateCallLogs failed", {
+                    error: mergeErr.message,
+                    lead_id: outboundLeadId || null,
+                });
+            }
         }
     } catch (err) {
         logger.error(`[CallLog] appendCallEvent failed: ${err.message}`, { logLabel, event_type });
@@ -620,4 +656,5 @@ module.exports = {
     upsertTelnyxAnchoredCallLog,
     TELNYX_STATUS_EVENT,
     isUuidCallKey,
+    mergeOutboundDuplicateCallLogs,
 };
