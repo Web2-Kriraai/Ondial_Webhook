@@ -21,8 +21,8 @@ function hashPayload(payload) {
 }
 
 /**
- * Enqueue Meta Cloud API inbound webhook for Calling_system1 scheduler consumer.
- * Ondial_Webhook is producer-only for this queue (no local worker).
+ * Enqueue Meta Cloud API inbound webhook for the local BullMQ consumer
+ * (whatsapp/metaInboundWorker.js) on the same Redis as this process.
  */
 async function enqueueMetaWhatsappInbound(payload, meta = {}) {
     const q = getQueue();

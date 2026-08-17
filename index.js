@@ -38,6 +38,11 @@ const {
     closeMetaWhatsappInboundQueue,
     getMetaWhatsappInboundQueueHealth,
 } = require("./metaInboundQueue");
+const {
+    startMetaWhatsappInboundWorker,
+    stopMetaWhatsappInboundWorker,
+    getMetaWhatsappInboundWorkerHealth,
+} = require("./whatsapp/metaInboundWorker");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
 const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
 const { summarizeMetaWhatsappPayload } = require("./lib/metaWhatsappLogSummary");
@@ -2751,15 +2756,19 @@ app.get("/health", (req, res) => {
 
 app.get("/health/slo", async (req, res) => {
     try {
-        const [queue, metaWhatsapp] = await Promise.all([
+        const [queue, metaWhatsappQueue, metaWhatsappWorker] = await Promise.all([
             getQueueLagSnapshot(),
             getMetaWhatsappInboundQueueHealth(),
+            Promise.resolve(getMetaWhatsappInboundWorkerHealth()),
         ]);
         return res.json({
             status: "ok",
             time: new Date().toISOString(),
             webhookQueue: queue,
-            metaWhatsapp,
+            metaWhatsapp: {
+                ...metaWhatsappQueue,
+                worker: metaWhatsappWorker,
+            },
         });
     } catch (error) {
         return res.status(500).json({
@@ -2785,6 +2794,12 @@ async function start() {
             logger.error("Failed to start webhook workers", { error: err.message });
             process.exit(1);
         });
+        try {
+            startMetaWhatsappInboundWorker();
+        } catch (err) {
+            logger.error("Failed to start Meta WhatsApp inbound worker", { error: err.message });
+            process.exit(1);
+        }
         app.listen(PORT, "0.0.0.0", () => {
             logger.info(`Server started on port ${PORT}`);
         });
@@ -2802,6 +2817,7 @@ function setupShutdownHandlers() {
         logger.info("Shutdown signal received", { signal });
         try {
             await closeWebhookWorkers();
+            await stopMetaWhatsappInboundWorker();
             await closeAisensyInboundQueue();
             await closeMetaWhatsappInboundQueue();
         } catch (err) {
