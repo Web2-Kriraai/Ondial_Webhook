@@ -2386,17 +2386,25 @@ async function handlePoolConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(callKey, {
-        isTestCall:
-            storedDoc?.isTestCall === true ||
-            mapping?.is_test_call === true ||
-            inferIsTestCallFromWebhookBody(body),
-    }).catch((err) => {
-        logger.warn("[Pool] Analysis trigger failed after conversation store", {
-            call_id: callKey,
-            error: err.message,
+    // India/pool analysis is owned by Calling_system1 post-call.
+    // Optional safety net only: WEBHOOK_TRIGGER_INDIA_ANALYSIS=true (uses ANALYSIS_API_URL on this host).
+    if (
+        String(process.env.WEBHOOK_TRIGGER_INDIA_ANALYSIS || "")
+            .trim()
+            .toLowerCase() === "true"
+    ) {
+        triggerCallAnalysis(callKey, {
+            isTestCall:
+                storedDoc?.isTestCall === true ||
+                mapping?.is_test_call === true ||
+                inferIsTestCallFromWebhookBody(body),
+        }).catch((err) => {
+            logger.warn("[Pool] Analysis trigger failed after conversation store", {
+                call_id: callKey,
+                error: err.message,
+            });
         });
-    });
+    }
 
     logger.info("[Pool] Conversation stored", {
         call_id: callKey,
