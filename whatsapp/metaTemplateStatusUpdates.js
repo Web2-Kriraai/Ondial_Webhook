@@ -1,3 +1,7 @@
+const {
+  upsertWhatsAppTemplatesFromPlatformMeta,
+} = require("./upsertMetaPlatformTemplates");
+
 const EVENT_TO_LIFECYCLE = {
   APPROVED: "active",
   PENDING: "processing",
@@ -32,6 +36,17 @@ function formatReason(value = {}) {
     .map((item) => String(item || "").trim())
     .filter((item) => item && item.toUpperCase() !== "NONE");
   return [...new Set(parts)].join(" — ").slice(0, 1_000);
+}
+
+function metaIdVariants(metaTemplateId) {
+  const raw = String(metaTemplateId || "").trim();
+  if (!raw) return [];
+  const variants = [raw];
+  if (/^\d+$/.test(raw)) {
+    const asNum = Number(raw);
+    if (Number.isSafeInteger(asNum)) variants.push(asNum);
+  }
+  return variants;
 }
 
 /**
@@ -69,17 +84,20 @@ function parseMetaTemplateStatusUpdates(payload) {
 }
 
 /**
- * Persist status changes for platform catalog + tenant Meta templates.
+ * Persist status changes for platform catalog + tenant Meta templates,
+ * then mirror APPROVED/REJECTED rows to owner + assigned tenant WhatsAppTemplate docs.
  */
 async function applyMetaTemplateStatusUpdates(db, payload) {
   const updates = parseMetaTemplateStatusUpdates(payload);
-  if (!updates.length) return { processed: 0, platformMatched: 0, tenantMatched: 0 };
+  if (!updates.length) return { processed: 0, platformMatched: 0, tenantMatched: 0, mirrored: 0 };
 
   let platformMatched = 0;
   let tenantMatched = 0;
+  let mirrored = 0;
 
   for (const update of updates) {
     const now = new Date();
+    const idVariants = metaIdVariants(update.metaTemplateId);
     const common = {
       status: update.status,
       rejectionReason: update.status === "active" ? "" : update.rejectionReason,
@@ -90,19 +108,21 @@ async function applyMetaTemplateStatusUpdates(db, payload) {
       ...common,
       ...(update.category ? { category: update.category } : {}),
       ...(update.status === "active"
-        ? { approvedAt: now, readyAt: now }
+        ? { approvedAt: now, readyAt: now, nextPollAt: null }
         : { readyAt: null }),
-      ...(update.status === "rejected" ? { nextPollAt: null } : {}),
+      ...(update.status === "rejected" || update.status === "paused"
+        ? { nextPollAt: null }
+        : {}),
     };
 
     const [platformResult, tenantResult] = await Promise.all([
       db.collection("platform_whatsapp_templates").updateMany(
-        { metaTemplateId: update.metaTemplateId },
-        { $set: { ...platformSet, provider: "meta" } }
+        { metaTemplateId: { $in: idVariants } },
+        { $set: { ...platformSet, provider: "meta", metaTemplateId: update.metaTemplateId } }
       ),
       db.collection("whatsapptemplates").updateMany(
-        { metaTemplateId: update.metaTemplateId },
-        { $set: common }
+        { metaTemplateId: { $in: idVariants } },
+        { $set: { ...common, metaTemplateId: update.metaTemplateId } }
       ),
     ]);
 
@@ -116,7 +136,7 @@ async function applyMetaTemplateStatusUpdates(db, payload) {
           $or: [
             { metaTemplateId: { $in: ["", null] } },
             { metaTemplateId: { $exists: false } },
-            { metaTemplateId: update.metaTemplateId },
+            { metaTemplateId: { $in: idVariants } },
           ],
         },
         {
@@ -136,7 +156,7 @@ async function applyMetaTemplateStatusUpdates(db, payload) {
           $or: [
             { metaTemplateId: { $in: ["", null] } },
             { metaTemplateId: { $exists: false } },
-            { metaTemplateId: update.metaTemplateId },
+            { metaTemplateId: { $in: idVariants } },
           ],
         },
         { $set: { ...common, metaTemplateId: update.metaTemplateId } }
@@ -146,6 +166,38 @@ async function applyMetaTemplateStatusUpdates(db, payload) {
 
     platformMatched += pMatched;
     tenantMatched += tMatched;
+
+    // Mirror to owner + assigned users so Omni / campaigns see the new status
+    // without waiting for a manual Refresh.
+    if (pMatched > 0 && (update.status === "active" || update.status === "rejected" || update.status === "paused")) {
+      const platformRows = await db
+        .collection("platform_whatsapp_templates")
+        .find({
+          $or: [
+            { metaTemplateId: { $in: idVariants } },
+            ...(update.templateName ? [{ templateName: update.templateName }] : []),
+          ],
+        })
+        .toArray();
+
+      for (const row of platformRows) {
+        const mirror = await upsertWhatsAppTemplatesFromPlatformMeta(db, {
+          ...row,
+          status: update.status,
+          metaTemplateId: update.metaTemplateId,
+          rejectionReason: common.rejectionReason,
+        });
+        mirrored += mirror.upserted || 0;
+        if (mirror.upserted) {
+          console.log("[MetaTemplateStatus] mirrored to tenant WhatsAppTemplate", {
+            templateName: row.templateName || update.templateName,
+            status: update.status,
+            upserted: mirror.upserted,
+            userIds: mirror.userIds,
+          });
+        }
+      }
+    }
 
     const matched = pMatched + tMatched;
     if (matched === 0) {
@@ -163,11 +215,12 @@ async function applyMetaTemplateStatusUpdates(db, payload) {
         status: update.status,
         platformMatched: pMatched,
         tenantMatched: tMatched,
+        mirrored,
       });
     }
   }
 
-  return { processed: updates.length, platformMatched, tenantMatched };
+  return { processed: updates.length, platformMatched, tenantMatched, mirrored };
 }
 
 module.exports = {
