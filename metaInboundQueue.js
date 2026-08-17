@@ -51,7 +51,11 @@ async function enqueueMetaWhatsappInbound(payload, meta = {}) {
         return { accepted: true, jobId, queueName: QUEUE_NAME };
     } catch (err) {
         if (String(err.message || "").includes("already exists")) {
-            return { accepted: true, duplicate: true, queueName: QUEUE_NAME };
+            logger.info("[MetaWhatsAppInbound] duplicate job coalesced", {
+                jobId,
+                queueName: QUEUE_NAME,
+            });
+            return { accepted: true, duplicate: true, jobId, queueName: QUEUE_NAME };
         }
         logger.error("[MetaWhatsAppInbound] enqueue failed", { error: err.message });
         throw err;

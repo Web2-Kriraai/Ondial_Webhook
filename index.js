@@ -40,6 +40,7 @@ const {
 } = require("./metaInboundQueue");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
 const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
+const { summarizeMetaWhatsappPayload } = require("./lib/metaWhatsappLogSummary");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
@@ -2676,6 +2677,7 @@ app.get("/api/webhook/whatsapp", (req, res) => {
 });
 
 app.post("/api/webhook/whatsapp", async (req, res) => {
+    const startedAt = Date.now();
     const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
     if (!appSecret) {
         logger.error("[MetaWhatsApp] WHATSAPP_APP_SECRET is not configured — rejecting POST");
@@ -2687,27 +2689,56 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
         req.headers["x-hub-signature-256"] || req.headers["X-Hub-Signature-256"];
 
     if (!verifyMetaWhatsappSignature(rawBody, signature, appSecret)) {
-        logger.error("[MetaWhatsApp] Invalid X-Hub-Signature-256");
+        logger.error("[MetaWhatsApp] Invalid X-Hub-Signature-256", {
+            hasSignature: Boolean(signature),
+            contentLength: rawBody?.length || 0,
+            sourceIp: req.ip,
+        });
         return res.status(401).json({ error: "Invalid signature" });
     }
 
     const payload = req.body;
     if (!payload || typeof payload !== "object") {
+        logger.error("[MetaWhatsApp] Invalid JSON body");
         return res.status(400).json({ error: "Invalid JSON" });
     }
     if (payload.object !== "whatsapp_business_account") {
+        logger.warn("[MetaWhatsApp] Unsupported webhook object", {
+            object: payload.object || null,
+        });
         return res.status(400).json({ error: "Unsupported webhook object" });
     }
+
+    const summary = summarizeMetaWhatsappPayload(payload);
+    logger.info("[MetaWhatsApp] POST accepted (signature ok)", {
+        ...summary,
+        sourceIp: req.ip,
+        rawBytes: rawBody?.length || 0,
+    });
 
     // Enqueue before ACK so Redis/BullMQ failures are not silently dropped after 200.
     // Meta retries on non-2xx; stable jobId coalesces those retries.
     try {
-        await enqueueMetaWhatsappInbound(payload, {
+        const enqueued = await enqueueMetaWhatsappInbound(payload, {
             signaturePresent: Boolean(signature),
             sourceIp: req.ip,
+            fields: summary.fields,
+        });
+        logger.info("[MetaWhatsApp] POST enqueued to BullMQ", {
+            jobId: enqueued?.jobId || null,
+            queueName: enqueued?.queueName || "whatsapp-meta-inbound",
+            duplicate: Boolean(enqueued?.duplicate),
+            fields: summary.fields,
+            messageCount: summary.messageCount,
+            templateEventCount: summary.templateEventCount,
+            durationMs: Date.now() - startedAt,
         });
     } catch (err) {
-        logger.error("[MetaWhatsApp] enqueue failed", { error: err.message });
+        logger.error("[MetaWhatsApp] enqueue failed", {
+            error: err.message,
+            fields: summary.fields,
+            durationMs: Date.now() - startedAt,
+        });
         return res.status(503).json({ error: "Queue unavailable", detail: err.message });
     }
 

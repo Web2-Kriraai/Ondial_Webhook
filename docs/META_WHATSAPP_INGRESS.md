@@ -6,7 +6,11 @@ Canonical public URL:
 - Test: `https://dev-api.ondial.ai/api/webhook/whatsapp`
 
 Register this URL in Meta Developer App → WhatsApp → Configuration → Webhook.
-Subscribe to `messages` (and optionally message status fields).
+Subscribe at least to:
+- `messages` (inbound + delivery statuses)
+- `message_template_status_update` (template APPROVED / REJECTED / PAUSED → Calling_system1 updates Mongo)
+
+Optional: `message_template_quality_update`.
 
 ## Behaviour
 
