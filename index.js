@@ -47,6 +47,7 @@ const { verifyAisensySignature } = require("./lib/aisensySignature");
 const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
 const { summarizeMetaWhatsappPayload } = require("./lib/metaWhatsappLogSummary");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
+const { processAisensyInboundSafe } = require("./whatsapp/processAisensyInbound");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
@@ -2618,7 +2619,7 @@ app.post("/api/inbound-mapping", async (req, res) => {
  * AiSensy provider ingress (canonical public URL):
  *   Live: https://api.ondial.ai/api/webhook/aisensy
  *   Test: https://dev-api.ondial.ai/api/webhook/aisensy
- * Enqueues to BullMQ `aisensy-inbound` for Calling_system1; updates marketing logs async.
+ * Enqueues to BullMQ `aisensy-inbound` (CS1 backup) and runs STOP + AI relay locally.
  */
 app.post("/api/webhook/aisensy", async (req, res) => {
     const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
@@ -2660,6 +2661,7 @@ app.post("/api/webhook/aisensy", async (req, res) => {
     res.status(200).json({ received: true });
 
     processAisensyMarketingWebhookSafe(payload);
+    processAisensyInboundSafe(payload);
 });
 
 /**

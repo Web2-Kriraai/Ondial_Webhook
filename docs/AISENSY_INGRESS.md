@@ -8,9 +8,13 @@ Canonical public URL:
 ## Behaviour
 
 1. Verify HMAC with `WEBHOOK_SECRET` (or `AISENSY_WEBHOOK_SECRET`)
-2. Return `200 { received: true }` immediately
-3. Enqueue payload to BullMQ `aisensy-inbound` (consumed by Calling_system1)
-4. Async marketing updates: `whatsappcampaignlogs` + STOP → `whatsappunsubscribes`
+2. Enqueue payload to BullMQ `aisensy-inbound` (CS1 backup consumer)
+3. Return `200 { received: true }`
+4. Async on this service:
+   - marketing updates: `whatsappcampaignlogs` + STOP → `whatsappunsubscribes`
+   - inbound chat → same STOP + slim AI relay as Meta (`whatsapp/processAisensyInbound.js`)
+
+Duplicate `messageId`s are ignored so a CS1 queue consumer cannot send a second AI reply.
 
 ## Env
 
@@ -22,7 +26,7 @@ Shared with Calling_system1:
 - Redis URL used by BullMQ (same Redis CS1 consumer)
 - Dashboard webhook URL (test): `https://dev-api.ondial.ai/api/webhook/aisensy`
 
-CS1 then calls `WHATSAPP_AI_REPLY_URL` (stub or real AI) for the next session message after a follow-up template was sent.
+Session AI payload is built here: `{ task, phone, message, sessionId, campaignId, contactId, callId, analysisId, history }`.
 
 ## Full E2E docs
 

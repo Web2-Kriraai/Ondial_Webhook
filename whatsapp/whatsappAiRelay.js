@@ -2,14 +2,13 @@ const { ObjectId } = require("mongodb");
 const {
   appendSessionHistory,
   getOrCreateSession,
-  historyForAi,
   buildSessionKey,
   findLatestSessionByPhone,
 } = require("./whatsappAiSessions");
 const { sendWhatsappSessionReply } = require("./sendSessionReply");
+const { buildWhatsappAiReplyPayload } = require("./buildWhatsappAiReplyPayload");
 
 const AI_TIMEOUT_MS = 30_000;
-const SCRIPT_EXCERPT_MAX = 4000;
 
 function phoneVariants(phone) {
   const normalized = String(phone || "").replace(/[\s+\-()]/g, "");
@@ -43,33 +42,41 @@ function toObjectIdOrNull(value) {
   return null;
 }
 
-function summarizeAnalysis(analysis) {
-  if (!analysis) return null;
-  const data = analysis.analysis_data || analysis.analysisData || {};
-  const nextAction = data.Next_Action || data.next_action || analysis.Next_Action || null;
-  return {
-    analysisId: analysis._id ? String(analysis._id) : null,
-    callId: analysis.call_id || analysis.callId || null,
-    category: data.Category || data.category || analysis.classification?.Category || null,
-    summary:
-      data.Conversation_Summary ||
-      data.conversation_summary ||
-      data.Summary ||
-      data.summary ||
-      null,
-    nextAction,
-    sentiment: data.Sentiment || data.sentiment || null,
-    appointment:
-      data.Appointment_Date ||
-      data.appointment_date ||
-      data.Appointment ||
-      data.appointment ||
-      null,
-    rawHints: {
-      product: data.Product || data.product || null,
-      interest: data.Interest_Level || data.interest_level || null,
-    },
-  };
+function alreadyStoredInbound(session, contact, messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) return false;
+  if ((session?.history || []).some((row) => row.role === "user" && String(row.messageId || "") === id)) {
+    return true;
+  }
+  if ((contact?.whatsappHistory || []).some((row) => String(row.messageId || "") === id)) {
+    return true;
+  }
+  return false;
+}
+
+function inboundAlreadyReplied(session, messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) return false;
+  const history = session?.history || [];
+  const idx = history.findIndex((row) => row.role === "user" && String(row.messageId || "") === id);
+  if (idx === -1) return false;
+  return history.slice(idx + 1).some((row) => row.role === "assistant");
+}
+
+async function findContactsForPhone(db, phoneNorm) {
+  const variants = phoneVariants(phoneNorm);
+  return db
+    .collection("contactprocessings")
+    .find({ $or: variants.map((mobileNumber) => ({ mobileNumber })) })
+    .sort({ updatedAt: -1 })
+    .limit(10)
+    .toArray();
+}
+
+function pickFollowupContact(contacts, session) {
+  if (!contacts.length) return null;
+  const active = contacts.find((contact) => isFollowupSessionActive(contact, session));
+  return active || contacts[0];
 }
 
 async function loadCallAnalysis(db, { session, contact, campaignId }) {
@@ -120,17 +127,50 @@ async function loadCallAnalysis(db, { session, contact, campaignId }) {
   return null;
 }
 
-async function loadCampaignScriptExcerpt(db, campaignId) {
-  if (!campaignId) return null;
-  const script = await db.collection("campaign_scripts").findOne({
-    $or: [{ campaignId }, { campaignId: String(campaignId) }],
-  });
-  if (!script) return null;
-  const text = String(script.generatedScript || "").trim();
-  if (!text) return null;
-  return text.length > SCRIPT_EXCERPT_MAX
-    ? `${text.slice(0, SCRIPT_EXCERPT_MAX)}…`
-    : text;
+async function loadCallLog(db, { session, analysis, contact }) {
+  const logs = await loadCallLogsForContact(db, { session, analysis, contact });
+  return logs.length ? logs[logs.length - 1] : null;
+}
+
+async function loadCallLogsForContact(db, { session, analysis, contact }) {
+  const collections = [
+    process.env.CALLLOGS_COLLECTION || "CallLogs",
+    process.env.TESTCALL_COLLECTION || "TestCall",
+  ];
+  const contactId = contact?._id || session?.contactId || null;
+
+  if (contactId) {
+    const oid = toObjectIdOrNull(contactId);
+    const contactOr = [{ contact_id: String(contactId) }];
+    if (oid) contactOr.push({ contact_id: oid });
+
+    const docs = await db
+      .collection(collections[0])
+      .find({ $or: contactOr })
+      .sort({ createdAt: 1 })
+      .limit(20)
+      .toArray();
+    if (docs.length) return docs;
+  }
+
+  const one = await loadCallLogByCallId(db, { session, analysis, collections });
+  return one ? [one] : [];
+}
+
+async function loadCallLogByCallId(db, { session, analysis, collections }) {
+  const callId = String(analysis?.call_id || analysis?.callId || session?.callId || "").trim();
+  if (!callId) return null;
+  const or = [{ call_id: callId }, { callId: callId }, { call_unique_id: callId }];
+  for (const name of collections) {
+    const doc = await db
+      .collection(name)
+      .find({ $or: or })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .next();
+    if (doc) return doc;
+  }
+  return null;
 }
 
 function isFollowupSessionActive(contact, session) {
@@ -150,34 +190,26 @@ async function fetchAiReply({
   campaign,
   contact,
   analysis,
-  scriptExcerpt,
+  callLogs,
 }) {
   const url =
     String(campaign?.whatsappSettings?.aiReplyUrl || "").trim() ||
-    String(process.env.WHATSAPP_AI_REPLY_URL || "").trim();
+    String(process.env.WHATSAPP_AI_REPLY_URL || "").trim() ||
+    `${String(process.env.ONDIAL_APP_URL || "").trim().replace(/\/$/, "")}/api/whatsapp/ai-reply`;
 
-  if (!url) {
+  if (!url || url === "/api/whatsapp/ai-reply") {
     return { ok: false, error: "WHATSAPP_AI_REPLY_URL is not configured" };
   }
 
-  const analysisSummary = summarizeAnalysis(analysis);
-  const payload = {
+  const payload = buildWhatsappAiReplyPayload({
     phone,
     message,
-    sessionId: session?.sessionKey || buildSessionKey(phone, campaign?._id),
-    campaignId: campaign?._id ? String(campaign._id) : null,
-    contactId: contact?._id ? String(contact._id) : null,
-    callId: analysisSummary?.callId || session?.callId || null,
-    analysisId:
-      analysisSummary?.analysisId ||
-      (session?.analysisId ? String(session.analysisId) : null),
-    history: historyForAi(session),
-    analysis: analysisSummary,
-    analysisData: analysis?.analysis_data || analysis?.analysisData || null,
-    nextAction: analysisSummary?.nextAction || null,
-    conversationSummary: analysisSummary?.summary || null,
-    dialScriptExcerpt: scriptExcerpt || null,
-  };
+    session,
+    campaign,
+    contact,
+    analysis,
+    callLogs,
+  });
 
   const headers = { "Content-Type": "application/json" };
   const secret = String(process.env.WHATSAPP_AI_REPLY_SECRET || "").trim();
@@ -233,26 +265,25 @@ function isConversationWindowOpen(replyTimestamp) {
 }
 
 /**
- * Handle inbound WhatsApp message: persist history, call AI, send Meta free-text reply.
+ * Handle inbound WhatsApp message on Ondial_Webhook:
+ * persist history, call AI with slim conversation payload, send session reply.
  */
 async function relayInboundWhatsAppMessage(db, {
   phone,
   text,
   messageId = "",
   timestamp = new Date(),
+  messageType = "text",
 }) {
   const phoneNorm = String(phone || "").replace(/[\s+\-()]/g, "");
   if (!phoneNorm || !String(text || "").trim()) {
     return { handled: false, reason: "empty" };
   }
 
-  const variants = phoneVariants(phoneNorm);
-  const contact = await db.collection("contactprocessings").findOne(
-    { $or: variants.map((mobileNumber) => ({ mobileNumber })) },
-    { sort: { updatedAt: -1 } }
-  );
-
+  const contacts = await findContactsForPhone(db, phoneNorm);
   let existingSession = await findLatestSessionByPhone(db, phoneNorm);
+  const contact = pickFollowupContact(contacts, existingSession);
+
   if (!existingSession && contact?.campaignId) {
     existingSession = await db.collection("whatsapp_ai_sessions").findOne({
       sessionKey: buildSessionKey(phoneNorm, contact.campaignId),
@@ -268,16 +299,18 @@ async function relayInboundWhatsAppMessage(db, {
     return { handled: false, reason: "no_followup_session" };
   }
 
+  if (inboundAlreadyReplied(existingSession, messageId)) {
+    return { handled: true, success: true, reason: "duplicate_message", kind: "duplicate" };
+  }
+
+  const alreadyInbound = alreadyStoredInbound(existingSession, contact, messageId);
+
   let campaign = null;
   const campaignId = contact?.campaignId || existingSession?.campaignId || null;
   if (campaignId) {
     campaign = await db.collection("campaigns").findOne({
       _id: toObjectIdOrNull(campaignId) || campaignId,
     });
-  }
-
-  if (!isAiRelayEnabled(campaign)) {
-    return { handled: false, reason: "ai_relay_disabled" };
   }
 
   let user = null;
@@ -302,18 +335,20 @@ async function relayInboundWhatsAppMessage(db, {
     analysisId: existingSession?.analysisId || null,
   });
 
-  await appendSessionHistory(db, session.sessionKey, {
-    role: "user",
-    text,
-    messageId,
-    timestamp,
-  });
+  if (!alreadyInbound) {
+    await appendSessionHistory(db, session.sessionKey, {
+      role: "user",
+      text,
+      messageId,
+      timestamp,
+    });
+  }
 
   const fresh = await db.collection("whatsapp_ai_sessions").findOne({
     sessionKey: session.sessionKey,
   });
 
-  if (contact?._id) {
+  if (contact?._id && !alreadyInbound) {
     await db.collection("contactprocessings").updateOne(
       { _id: contact._id },
       {
@@ -327,7 +362,7 @@ async function relayInboundWhatsAppMessage(db, {
           whatsappHistory: {
             direction: "inbound",
             messageId,
-            type: "text",
+            type: messageType || "text",
             text,
             timestamp,
           },
@@ -336,9 +371,13 @@ async function relayInboundWhatsAppMessage(db, {
     );
   }
 
+  if (!isAiRelayEnabled(campaign)) {
+    return { handled: true, success: true, reason: "ai_relay_disabled", kind: "persisted_only" };
+  }
+
   if (!isConversationWindowOpen(timestamp)) {
     const err = "conversation_window_closed";
-    console.warn("[WhatsApp] inbound after 24h window — template re-engagement not on webhook", {
+    console.warn("[WhatsApp] inbound after 24h window — free-text reply skipped", {
       phone: phoneNorm,
     });
     await db.collection("whatsapp_ai_sessions").updateOne(
@@ -353,7 +392,11 @@ async function relayInboundWhatsAppMessage(db, {
     contact,
     campaignId: campaign?._id,
   });
-  const scriptExcerpt = await loadCampaignScriptExcerpt(db, campaign?._id);
+  const callLogs = await loadCallLogsForContact(db, {
+    session: fresh || session,
+    analysis,
+    contact,
+  });
 
   const aiResult = await fetchAiReply({
     phone: phoneNorm,
@@ -362,7 +405,7 @@ async function relayInboundWhatsAppMessage(db, {
     campaign,
     contact,
     analysis,
-    scriptExcerpt,
+    callLogs,
   });
 
   if (!aiResult.ok) {
@@ -447,4 +490,5 @@ async function relayInboundWhatsAppMessage(db, {
 
 module.exports = {
   relayInboundWhatsAppMessage,
+  buildWhatsappAiReplyPayload,
 };

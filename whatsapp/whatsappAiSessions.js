@@ -116,7 +116,7 @@ async function appendSessionHistory(db, sessionKey, entry) {
   );
 }
 
-function historyForAi(session, limit = 20) {
+function historyForAi(session, limit = 100) {
   const items = (session?.history || []).slice(-limit);
   return items.map((e) => ({
     role: e.role,

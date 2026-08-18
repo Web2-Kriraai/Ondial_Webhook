@@ -34,7 +34,23 @@ Meta Cloud API → Ondial_Webhook (DO) → Redis localhost → Meta worker → M
 5. Local worker (`whatsapp/metaInboundWorker.js`) drains the queue:
    - template status → `platform_whatsapp_templates` / `whatsapptemplates`
    - delivery status → `contactprocessings.whatsappStatus`
-   - inbound chat → STOP list + AI relay + Meta free-text send
+   - inbound chat → STOP list + slim conversation AI payload + Meta free-text send
+
+Inbound AI scenarios handled on this service (not Ondial dashboard, not CS1 Meta consumer):
+
+| Event | Behaviour |
+|-------|-----------|
+| Text / button / interactive reply | Slim `history` payload → AI → Graph free-text |
+| Image/video/document caption | Caption is the customer message |
+| Media without caption | Placeholder turn, still relayed |
+| Reaction / system | Ignored |
+| STOP / UNSUBSCRIBE | Unsubscribe list, no AI |
+| Duplicate `messageId` | No second AI send |
+| AI toggle off | Persist inbound only |
+| 24h window closed | Persist inbound, skip free-text |
+| No follow-up session | Skip |
+
+AI request body is `{ task, phone, message, sessionId, campaignId, contactId, callId, analysisId, history }` only.
 6. Return `200 { received: true }` **only after** `await Queue.add` succeeds (Redis has acknowledged the job write). Queue/Redis failures return `503` so Meta retries — events are never ACKed then dropped.
 
 Webhook job IDs are derived from the full payload hash. Meta retry deliveries are therefore coalesced while
@@ -89,7 +105,7 @@ See Ondial `docs/WHATSAPP_META_HOW_IT_WORKS.md` §5.1 for production gaps (windo
 
 ## AiSensy sibling
 
-AiSensy remains at `/api/webhook/aisensy` → `aisensy-inbound` (still consumed by Calling_system1 when Redis is shared for that queue). Providers are exclusive per user in Ondial Omni Channel.
+AiSensy remains at `/api/webhook/aisensy`. Inbound chat AI is handled on this service with the same slim payload as Meta. The `aisensy-inbound` queue is a CS1 backup; duplicate `messageId`s are ignored.
 
 ## Full E2E
 
