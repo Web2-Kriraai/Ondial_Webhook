@@ -50,12 +50,6 @@ function startMetaWhatsappInboundWorker() {
       }
 
       const fields = summarizePayloadFields(payload);
-      logger.info("[MetaWhatsAppInbound] job started", {
-        jobId: job?.id,
-        attempt: job?.attemptsMade,
-        fields,
-      });
-
       const { inbound, statuses, templateStatuses } = await processMetaInboundPayload(payload);
       const failedStatuses = [];
       try {
@@ -109,7 +103,6 @@ function startMetaWhatsappInboundWorker() {
         statusUpdates: statuses?.processed ?? null,
         templateUpdates: templateStatuses?.processed ?? 0,
       };
-      logger.info("[MetaWhatsAppInbound] job completed", lastJobSummary);
       return result;
     },
     {

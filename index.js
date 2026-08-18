@@ -45,7 +45,11 @@ const {
 } = require("./whatsapp/metaInboundWorker");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
 const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
-const { summarizeMetaWhatsappPayload } = require("./lib/metaWhatsappLogSummary");
+const {
+    summarizeMetaWhatsappPayload,
+    shouldLogMetaWebhook,
+    compactMetaWebhookLog,
+} = require("./lib/metaWhatsappLogSummary");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
 const { processAisensyInboundSafe } = require("./whatsapp/processAisensyInbound");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
@@ -2725,11 +2729,6 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
     }
 
     const summary = summarizeMetaWhatsappPayload(payload);
-    logger.info("[MetaWhatsApp] POST accepted (signature ok)", {
-        ...summary,
-        sourceIp: req.ip,
-        rawBytes: rawBody?.length || 0,
-    });
 
     // Enqueue before ACK so Redis/BullMQ failures are not silently dropped after 200.
     // Meta retries on non-2xx; stable jobId coalesces those retries.
@@ -2739,15 +2738,12 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             sourceIp: req.ip,
             fields: summary.fields,
         });
-        logger.info("[MetaWhatsApp] POST enqueued to BullMQ", {
-            jobId: enqueued?.jobId || null,
-            queueName: enqueued?.queueName || "whatsapp-meta-inbound",
-            duplicate: Boolean(enqueued?.duplicate),
-            fields: summary.fields,
-            messageCount: summary.messageCount,
-            templateEventCount: summary.templateEventCount,
-            durationMs: Date.now() - startedAt,
-        });
+        if (shouldLogMetaWebhook(summary)) {
+            logger.info("[MetaWhatsApp] inbound", compactMetaWebhookLog(summary, {
+                jobId: enqueued?.jobId || null,
+                durationMs: Date.now() - startedAt,
+            }));
+        }
     } catch (err) {
         logger.error("[MetaWhatsApp] enqueue failed", {
             error: err.message,

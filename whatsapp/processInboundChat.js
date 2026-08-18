@@ -41,19 +41,21 @@ async function processInboundChatPayload(db, payload, { source = "whatsapp" } = 
       messageId: inbound.messageId,
       timestamp: inbound.timestamp,
       messageType: inbound.type || "text",
+      phoneNumberId: inbound.phoneNumberId || "",
     });
     if (result.handled) relays += 1;
     else skipped += 1;
-    logger.info("[WhatsApp inbound] AI relay", {
-      source,
-      phone: inbound.phone,
-      type: inbound.type || null,
-      handled: result.handled,
-      success: result.success,
-      reason: result.reason,
-      error: result.error,
-      kind: result.kind,
-    });
+    if (!result.handled || result.success === false) {
+      logger.info("[WhatsApp] inbound result", {
+        source,
+        phone: inbound.phone,
+        handled: result.handled,
+        success: result.success ?? null,
+        reason: result.reason || null,
+        error: result.error || null,
+        kind: result.kind || null,
+      });
+    }
   }
 
   return { processed: inboundMessages.length, stops, relays, skipped };
