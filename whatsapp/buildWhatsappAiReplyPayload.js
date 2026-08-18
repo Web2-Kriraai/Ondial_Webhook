@@ -3,6 +3,8 @@
  * All production calls for the contact (oldest → newest) + WhatsApp history.
  */
 
+const { resolveCampaignIntlTimeZoneId } = require("./campaignIntlTimeZone");
+
 const MAX_CALLS_FOR_AI = 20;
 
 function toIso(value) {
@@ -217,36 +219,40 @@ function weekdayHours(businessHours) {
 function formatZonedDateTime(value, timeZone) {
   const date = value instanceof Date ? value : value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return null;
-  const tz = String(timeZone || "Asia/Kolkata").trim() || "UTC";
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(date)
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value])
-  );
-  const asUtc = Date.UTC(
-    Number(parts.year),
-    Number(parts.month) - 1,
-    Number(parts.day),
-    Number(parts.hour),
-    Number(parts.minute),
-    Number(parts.second)
-  );
-  const offsetMin = Math.round((asUtc - date.getTime()) / 60000);
-  const sign = offsetMin >= 0 ? "+" : "-";
-  const abs = Math.abs(offsetMin);
-  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
-  const mm = String(abs % 60).padStart(2, "0");
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${hh}:${mm}`;
+  const tz = resolveCampaignIntlTimeZoneId(timeZone);
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(date)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value])
+    );
+    const asUtc = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+    const offsetMin = Math.round((asUtc - date.getTime()) / 60000);
+    const sign = offsetMin >= 0 ? "+" : "-";
+    const abs = Math.abs(offsetMin);
+    const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+    const mm = String(abs % 60).padStart(2, "0");
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${hh}:${mm}`;
+  } catch {
+    return date.toISOString();
+  }
 }
 
 function firstName(value) {
@@ -317,7 +323,7 @@ function buildWhatsappAiReplyPayload({
 } = {}) {
   const grouped = callConversationForAi({ callLogs, callLog, analysis, callConversation });
   const latest = grouped.length ? grouped[grouped.length - 1] : null;
-  const timezone = String(campaign?.timezone || "Asia/Kolkata").trim() || "Asia/Kolkata";
+  const timezone = resolveCampaignIntlTimeZoneId(campaign?.timezone || "Asia/Kolkata");
   const campaignId = campaign?._id ? String(campaign._id) : null;
   const phoneNorm = String(phone || "").trim();
   const callAnalysis = callAnalysisBlock(analysis);
@@ -387,5 +393,6 @@ module.exports = {
   buildWhatsappAiReplyPayload,
   conversationForAi,
   callConversationForAi,
+  formatZonedDateTime,
   MAX_CALLS_FOR_AI,
 };
