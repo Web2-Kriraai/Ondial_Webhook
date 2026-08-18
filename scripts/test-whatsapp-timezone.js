@@ -56,3 +56,22 @@ test("Python WhatsApp reply schema uses snake_case calls and non-empty company n
   assert.ok(payload.call_conversation[0].turns[0].timestamp);
   assert.ok(payload.call_conversation[0].turns[1].timestamp);
 });
+
+test("top-level call_id matches a call_conversation item", () => {
+  const wrapped = buildWhatsappAiReplyPayload({
+    phone: "916353125194",
+    message: "Hello",
+    session: { callId: "c80d64fc-dc78-4aee-9ec9-d311d0907b4d" },
+    analysis: { call_id: "c80d64fc-dc78-4aee-9ec9-d311d0907b4d" },
+    campaign: { companyName: "ShopSphere" },
+    callLogs: [
+      {
+        isTestCall: false,
+        call_id: "ffd8ddba-0b3f-4caf-bc80-60e03add61a6",
+        conversation: { turns: [{ role: "user", text: "Hi", timestamp: "2026-08-18T09:11:11.209Z" }] },
+      },
+    ],
+  });
+  assert.equal(wrapped.payload.call_conversation[0].call_id, "ffd8ddba-0b3f-4caf-bc80-60e03add61a6");
+  assert.equal(wrapped.payload.call_id, "ffd8ddba-0b3f-4caf-bc80-60e03add61a6");
+});

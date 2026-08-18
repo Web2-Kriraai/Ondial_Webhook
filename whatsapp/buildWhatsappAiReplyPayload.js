@@ -217,9 +217,16 @@ function pythonWhatsappHistory(history) {
   return withTurnTimestamps(history || [], new Date().toISOString());
 }
 
+function matchingCallId(preferred, pythonCalls) {
+  const ids = (pythonCalls || []).map((row) => String(row.call_id || "").trim()).filter(Boolean);
+  const want = String(preferred || "").trim();
+  if (want && ids.includes(want)) return want;
+  return ids.length ? ids[ids.length - 1] : want || null;
+}
+
 function resolveCompanyName(campaign, knowledgeBase) {
   const named = asTrimmed(
-    campaign?.companyName || campaign?.selectedCompanyName || campaign?.company?.name || campaign?.campaignName,
+    campaign?.companyName || campaign?.selectedCompanyName || campaign?.company?.name,
     120
   );
   if (named) return named;
@@ -368,7 +375,6 @@ function buildWhatsappAiReplyPayload({
 } = {}) {
   const grouped = callConversationForAi({ callLogs, callLog, analysis, callConversation });
   const pythonCalls = pythonCallConversation(grouped);
-  const latest = pythonCalls.length ? pythonCalls[pythonCalls.length - 1] : null;
   const timezone = resolveCampaignIntlTimeZoneId(campaign?.timezone || "Asia/Kolkata");
   const campaignId = campaign?._id ? String(campaign._id) : null;
   const phoneNorm = String(phone || "").trim();
@@ -390,8 +396,10 @@ function buildWhatsappAiReplyPayload({
         : session?.contactId
           ? String(session.contactId)
           : null,
-      call_id:
-        analysis?.call_id || analysis?.callId || session?.callId || latest?.call_id || null,
+      call_id: matchingCallId(
+        analysis?.call_id || analysis?.callId || session?.callId,
+        pythonCalls
+      ),
       wizard_service_id: wizardServiceId,
       sub_service_id: subServiceId,
       current_time: formatZonedDateTime(new Date(), timezone),
