@@ -365,6 +365,7 @@ async function relayInboundWhatsAppMessage(db, {
             type: messageType || "text",
             text,
             timestamp,
+            kind: "inbound",
           },
         },
       }
