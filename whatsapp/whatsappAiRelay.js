@@ -216,7 +216,7 @@ async function fetchAiReply({
     callLogs,
   });
 
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", "x-header-key": "1" };
   const secret = String(process.env.WHATSAPP_AI_REPLY_SECRET || "").trim();
   if (secret) headers.Authorization = `Bearer ${secret}`;
 
