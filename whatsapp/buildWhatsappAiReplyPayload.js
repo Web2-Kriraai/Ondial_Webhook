@@ -192,6 +192,116 @@ function buildSessionKey(phone, campaignId) {
   return `wa:${p}:campaign:${c}`;
 }
 
+function asTrimmed(value, max = 0) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (max > 0 && text.length > max) return `${text.slice(0, max)}…`;
+  return text;
+}
+
+function weekdayHours(businessHours) {
+  if (!businessHours || typeof businessHours !== "object") return "";
+  const days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+  return days
+    .map((day) => {
+      const row = businessHours[day];
+      if (!row || row.closed) return `${day}: Closed`;
+      const open = String(row.open || "").trim();
+      const close = String(row.close || "").trim();
+      if (!open && !close) return `${day}: Closed`;
+      return `${day}: ${open || "?"}-${close || "?"}`;
+    })
+    .join("; ");
+}
+
+function formatZonedDateTime(value, timeZone) {
+  const date = value instanceof Date ? value : value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return null;
+  const tz = String(timeZone || "Asia/Kolkata").trim() || "UTC";
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  const offsetMin = Math.round((asUtc - date.getTime()) / 60000);
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${hh}:${mm}`;
+}
+
+function firstName(value) {
+  return asTrimmed(value).split(/\s+/)[0] || "";
+}
+
+function contactNameFromDoc(contact) {
+  if (!contact || typeof contact !== "object") return "";
+  const data = contact.contactData && typeof contact.contactData === "object" ? contact.contactData : {};
+  for (const key of Object.keys(data)) {
+    const k = key.toLowerCase().replace(/[\s_-]/g, "");
+    if (k === "name" || k === "fullname" || k === "firstname" || k === "customername") {
+      return firstName(data[key]);
+    }
+  }
+  return firstName(contact.name || contact.userName || "");
+}
+
+function analysisDataOf(analysis) {
+  if (!analysis || typeof analysis !== "object") return {};
+  const data = analysis.analysis_data || analysis.analysisData || analysis;
+  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+}
+
+function callAnalysisBlock(analysis) {
+  const data = analysisDataOf(analysis);
+  const summary = asTrimmed(
+    data.conversation_summary ||
+      data.Conversation_Summary ||
+      data.summary ||
+      data.Summary ||
+      analysis?.summary ||
+      "",
+    1200
+  );
+  const callback = data.callback_requested || data.Callback_Requested || data.callbackRequested || {};
+  const status = callback?.status === true || callback?.Status === true;
+  const window = asTrimmed(
+    callback.window || callback.Window || callback.scheduled_at || callback.scheduledAt || callback.Scheduled_At || ""
+  );
+  return {
+    summary,
+    callback_requested: {
+      status,
+      window: status ? window || null : null,
+    },
+  };
+}
+
+function languageCode(value) {
+  const raw = String(value || "en").trim();
+  if (!raw) return "en";
+  return raw.split(/[-_]/)[0].toLowerCase() || "en";
+}
+
 function buildWhatsappAiReplyPayload({
   phone,
   message,
@@ -207,28 +317,69 @@ function buildWhatsappAiReplyPayload({
 } = {}) {
   const grouped = callConversationForAi({ callLogs, callLog, analysis, callConversation });
   const latest = grouped.length ? grouped[grouped.length - 1] : null;
+  const timezone = String(campaign?.timezone || "Asia/Kolkata").trim() || "Asia/Kolkata";
+  const campaignId = campaign?._id ? String(campaign._id) : null;
+  const phoneNorm = String(phone || "").trim();
+  const callAnalysis = callAnalysisBlock(analysis);
+  const channels = Array.isArray(campaign?.followupChannels) ? campaign.followupChannels : [];
+  const followup = campaign?.followup === true;
+  const wizardServiceId = String(
+    (Array.isArray(campaign?.selectedServices) && campaign.selectedServices[0]) || ""
+  );
+  const subServiceId = String(campaign?.campaignServiceSubId || "");
+  const serviceId =
+    wizardServiceId && subServiceId
+      ? `${wizardServiceId}.${subServiceId}`
+      : wizardServiceId || subServiceId;
+
   return {
-    task: "whatsapp_session_reply",
-    phone: String(phone || "").trim(),
-    message: String(message || "").trim(),
-    sessionId: session?.sessionKey || buildSessionKey(phone, campaign?._id),
-    campaignId: campaign?._id ? String(campaign._id) : null,
-    contactId: contact?._id
-      ? String(contact._id)
-      : session?.contactId
-        ? String(session.contactId)
-        : null,
-    callId:
-      analysis?.call_id || analysis?.callId || session?.callId || latest?.callId || null,
-    analysisId: analysis?._id
-      ? String(analysis._id)
-      : session?.analysisId
-        ? String(session.analysisId)
-        : null,
-    callStartedAt: toIso(callStartedAt) || latest?.callStartedAt || null,
-    callEndedAt: toIso(callEndedAt) || latest?.callEndedAt || null,
-    callConversation: grouped,
-    history: conversationForAi(session, contact),
+    payload: {
+      session_id: session?.sessionKey || buildSessionKey(phoneNorm, campaignId),
+      campaign_id: campaignId,
+      contact_id: contact?._id
+        ? String(contact._id)
+        : session?.contactId
+          ? String(session.contactId)
+          : null,
+      call_id:
+        analysis?.call_id || analysis?.callId || session?.callId || latest?.callId || null,
+      wizard_service_id: wizardServiceId,
+      sub_service_id: subServiceId,
+      service_id: serviceId,
+      current_time: formatZonedDateTime(new Date(), timezone),
+      timezone,
+      language: languageCode(campaign?.primaryLanguage),
+      contact: {
+        name: contactNameFromDoc(contact) || firstName(session?.userName),
+        mobile: phoneNorm,
+      },
+      company: {
+        name: asTrimmed(campaign?.companyName, 120),
+        description: asTrimmed(campaign?.companyDescription, 800),
+        business_hours: asTrimmed(
+          weekdayHours(campaign?.businessHours) || weekdayHours(campaign?.callingHours?.schedule),
+          400
+        ),
+      },
+      agent: {
+        name: asTrimmed(campaign?.agentName, 80),
+      },
+      knowledge_base_summary: asTrimmed(campaign?.knowledgeBaseSummarized, 1500),
+      features_enabled: {
+        is_followup_enabled: followup,
+        whatsapp_followup: { status: followup && channels.includes("whatsapp") },
+        callback_scheduling: {
+          status:
+            (followup && channels.includes("call")) ||
+            campaign?.appointmentsDemosEnabled === true ||
+            callAnalysis.callback_requested.status === true,
+        },
+      },
+      call_analysis: callAnalysis,
+      inbound_message: String(message || "").trim(),
+      call_conversation: grouped,
+      whatsapp_history: conversationForAi(session, contact),
+    },
   };
 }
 

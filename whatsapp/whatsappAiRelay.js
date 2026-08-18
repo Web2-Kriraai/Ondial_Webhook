@@ -7,6 +7,11 @@ const {
 } = require("./whatsappAiSessions");
 const { sendWhatsappSessionReply } = require("./sendSessionReply");
 const { buildWhatsappAiReplyPayload } = require("./buildWhatsappAiReplyPayload");
+const {
+  canSendWhatsappReply,
+  normalizeWhatsappAiReplyResponse,
+} = require("./whatsappAiReplyResponse");
+const { applyWhatsappCallbackUpdate } = require("./applyWhatsappCallbackUpdate");
 
 const AI_TIMEOUT_MS = 30_000;
 
@@ -237,9 +242,9 @@ async function fetchAiReply({
         error: data?.error || data?.message || `AI HTTP ${response.status}`,
       };
     }
-    const reply = String(data.reply ?? data.message ?? data.text ?? data.response ?? "").trim();
-    if (!reply) return { ok: false, error: "AI returned empty reply" };
-    return { ok: true, reply };
+    const normalized = normalizeWhatsappAiReplyResponse(data, payload);
+    if (!normalized.ok) return normalized;
+    return normalized;
   } catch (error) {
     return {
       ok: false,
@@ -422,18 +427,52 @@ async function relayInboundWhatsAppMessage(db, {
     return { handled: true, success: false, error: aiResult.error };
   }
 
+  const freshContact = contact?._id
+    ? (await db.collection("contactprocessings").findOne({ _id: contact._id })) || contact
+    : contact;
+  let callbackPatch = { applied: false };
+  if (aiResult.callback_update) {
+    try {
+      callbackPatch = await applyWhatsappCallbackUpdate(db, {
+        contact: freshContact,
+        analysis,
+        campaign,
+        callbackUpdate: aiResult.callback_update,
+      });
+    } catch (err) {
+      console.warn("[WhatsApp] callback_update apply failed", err?.message || err);
+    }
+  }
+
+  if (!canSendWhatsappReply(aiResult)) {
+    console.log("[WhatsApp] AI next message skipped (should_reply=false)", {
+      phone: phoneNorm,
+      callbackAction: callbackPatch.action || null,
+    });
+    return {
+      handled: true,
+      success: true,
+      reply: "",
+      kind: "no_reply",
+      callbackAction: callbackPatch.action || null,
+    };
+  }
+
   console.log("[WhatsApp] AI next message send", {
     phone: phoneNorm,
     campaignId: campaign?._id ? String(campaign._id) : null,
     analysisId: analysis?._id ? String(analysis._id) : null,
-    replyLen: aiResult.reply.length,
+    replyLen: (aiResult.reply || aiResult.reply_text || "").length,
+    callbackAction: callbackPatch.action || null,
   });
+
+  const replyText = aiResult.reply || aiResult.reply_text || "";
 
   const sendResult = await sendWhatsappSessionReply(db, {
     user,
     profile,
     phone: phoneNorm,
-    text: aiResult.reply,
+    text: replyText,
     campaignId: campaign?._id,
     contactId: contact?._id,
     conversationWindowOpensUntil: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000),
@@ -449,7 +488,7 @@ async function relayInboundWhatsAppMessage(db, {
 
   await appendSessionHistory(db, session.sessionKey, {
     role: "assistant",
-    text: aiResult.reply,
+    text: replyText,
     messageId: sendResult.messageId || "",
     isAiGenerated: true,
   });
@@ -469,7 +508,7 @@ async function relayInboundWhatsAppMessage(db, {
             direction: "outbound",
             messageId: sendResult.messageId,
             type: "text",
-            text: aiResult.reply,
+            text: replyText,
             timestamp: new Date(),
             isAiGenerated: true,
             kind: "ai_next_message",
@@ -482,10 +521,11 @@ async function relayInboundWhatsAppMessage(db, {
   return {
     handled: true,
     success: true,
-    reply: aiResult.reply,
+    reply: replyText,
     messageId: sendResult.messageId,
     via: sendResult.via,
     kind: "ai_next_message",
+    callbackAction: callbackPatch.action || null,
   };
 }
 
