@@ -1,5 +1,6 @@
 const { parseInboundMessages, isStopMessage } = require("./inboundParser");
 const { relayInboundWhatsAppMessage } = require("./whatsappAiRelay");
+const logger = require("../logger");
 
 /**
  * Shared inbound chat handling for Meta and AiSensy webhook events.
@@ -43,7 +44,7 @@ async function processInboundChatPayload(db, payload, { source = "whatsapp" } = 
     });
     if (result.handled) relays += 1;
     else skipped += 1;
-    console.log("[WhatsApp inbound] AI relay:", {
+    logger.info("[WhatsApp inbound] AI relay", {
       source,
       phone: inbound.phone,
       type: inbound.type || null,

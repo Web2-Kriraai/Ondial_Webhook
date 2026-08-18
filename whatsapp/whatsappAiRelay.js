@@ -1,4 +1,5 @@
 const { ObjectId } = require("mongodb");
+const logger = require("../logger");
 const {
   appendSessionHistory,
   getOrCreateSession,
@@ -188,6 +189,59 @@ function isFollowupSessionActive(contact, session) {
   return false;
 }
 
+function formatFastApiDetail(detail) {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((row) => {
+        if (typeof row === "string") return row;
+        if (!row || typeof row !== "object") return String(row);
+        const loc = Array.isArray(row.loc) ? row.loc.filter((p) => p !== "body").join(".") : "";
+        const msg = row.msg || row.message || "";
+        return [loc, msg].filter(Boolean).join(": ");
+      })
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return String(detail);
+    }
+  }
+  return String(detail);
+}
+
+function formatAiHttpError(status, data, rawText) {
+  const fromDetail = formatFastApiDetail(data?.detail);
+  const fromFields = data?.error || data?.message || data?.msg || "";
+  const text = String(fromDetail || fromFields || rawText || "").replace(/\s+/g, " ").trim();
+  return text ? `AI HTTP ${status}: ${text.slice(0, 1200)}` : `AI HTTP ${status}`;
+}
+
+function summarizeAiRequestPayload(wrapped) {
+  const p = wrapped?.payload && typeof wrapped.payload === "object" ? wrapped.payload : wrapped || {};
+  return {
+    session_id: p.session_id || null,
+    campaign_id: p.campaign_id || null,
+    contact_id: p.contact_id || null,
+    call_id: p.call_id || null,
+    service_id: p.service_id || null,
+    wizard_service_id: p.wizard_service_id || null,
+    sub_service_id: p.sub_service_id || null,
+    timezone: p.timezone || null,
+    language: p.language || null,
+    current_time: p.current_time || null,
+    inbound_message: String(p.inbound_message || "").slice(0, 160),
+    call_conversation_count: Array.isArray(p.call_conversation) ? p.call_conversation.length : 0,
+    whatsapp_history_count: Array.isArray(p.whatsapp_history) ? p.whatsapp_history.length : 0,
+    company: p.company?.name || null,
+    agent: p.agent?.name || null,
+  };
+}
+
 async function fetchAiReply({
   phone,
   message,
@@ -215,10 +269,24 @@ async function fetchAiReply({
     analysis,
     callLogs,
   });
+  const payloadSummary = summarizeAiRequestPayload(payload);
 
   const headers = { "Content-Type": "application/json", "x-header-key": "1" };
   const secret = String(process.env.WHATSAPP_AI_REPLY_SECRET || "").trim();
   if (secret) headers.Authorization = `Bearer ${secret}`;
+
+  const started = Date.now();
+  const fullLog = { maxChars: 250000 };
+  logger.info("[WhatsApp] AI request body", {
+    url,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-header-key": "1",
+      Authorization: secret ? "Bearer ***" : null,
+    },
+    body: payload,
+  }, fullLog);
 
   try {
     const controller = new AbortController();
@@ -235,24 +303,76 @@ async function fetchAiReply({
       clearTimeout(timer);
     }
 
-    const data = await response.json().catch(() => ({}));
-    if (response.status < 200 || response.status >= 300) {
-      return {
-        ok: false,
-        error: data?.error || data?.message || `AI HTTP ${response.status}`,
-      };
+    const rawText = await response.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      data = {};
     }
+    const durationMs = Date.now() - started;
+    const responseBody = Object.keys(data).length ? data : rawText;
+
+    logger.info("[WhatsApp] AI response body", {
+      url,
+      phone,
+      status: response.status,
+      ok: response.ok,
+      durationMs,
+      body: responseBody,
+    }, fullLog);
+
+    if (response.status < 200 || response.status >= 300) {
+      const error = formatAiHttpError(response.status, data, rawText);
+      logger.error("[WhatsApp] AI next message failed", {
+        url,
+        phone,
+        status: response.status,
+        durationMs,
+        error,
+        detail: data?.detail ?? null,
+        analysisId: analysis?._id ? String(analysis._id) : null,
+      });
+      return { ok: false, error, status: response.status, detail: data?.detail ?? null };
+    }
+
     const normalized = normalizeWhatsappAiReplyResponse(data, payload);
-    if (!normalized.ok) return normalized;
+    if (!normalized.ok) {
+      logger.warn("[WhatsApp] AI next message invalid response", {
+        url,
+        phone,
+        status: response.status,
+        durationMs,
+        error: normalized.error,
+      });
+      return normalized;
+    }
+
+    logger.info("[WhatsApp] AI next message ok", {
+      url,
+      phone,
+      status: response.status,
+      durationMs,
+      should_reply: normalized.should_reply !== false,
+      reply_text: normalized.reply_text || normalized.reply || "",
+      callback_update: normalized.callback_update || null,
+    });
     return normalized;
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error.name === "AbortError"
-          ? "AI request timed out"
-          : error.message || "AI request failed",
-    };
+    const durationMs = Date.now() - started;
+    const messageText =
+      error.name === "AbortError"
+        ? "AI request timed out"
+        : error.message || "AI request failed";
+    logger.error("[WhatsApp] AI next message failed", {
+      url,
+      phone,
+      durationMs,
+      error: messageText,
+      payload: payloadSummary,
+      analysisId: analysis?._id ? String(analysis._id) : null,
+    });
+    return { ok: false, error: messageText };
   }
 }
 
@@ -415,11 +535,6 @@ async function relayInboundWhatsAppMessage(db, {
   });
 
   if (!aiResult.ok) {
-    console.warn("[WhatsApp] AI next message failed", {
-      phone: phoneNorm,
-      error: aiResult.error,
-      analysisId: analysis?._id ? String(analysis._id) : null,
-    });
     await db.collection("whatsapp_ai_sessions").updateOne(
       { sessionKey: session.sessionKey },
       { $set: { lastError: aiResult.error, updatedAt: new Date() } }
