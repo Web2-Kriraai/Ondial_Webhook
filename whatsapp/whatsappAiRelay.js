@@ -215,9 +215,18 @@ function formatFastApiDetail(detail) {
 }
 
 function formatAiHttpError(status, data, rawText) {
+  const fromErrors = Array.isArray(data?.errors)
+    ? data.errors
+        .map((row) => {
+          if (!row || typeof row !== "object") return String(row || "");
+          return [row.field, row.message].filter(Boolean).join(": ");
+        })
+        .filter(Boolean)
+        .join("; ")
+    : "";
   const fromDetail = formatFastApiDetail(data?.detail);
   const fromFields = data?.error || data?.message || data?.msg || "";
-  const text = String(fromDetail || fromFields || rawText || "").replace(/\s+/g, " ").trim();
+  const text = String(fromErrors || fromDetail || fromFields || rawText || "").replace(/\s+/g, " ").trim();
   return text ? `AI HTTP ${status}: ${text.slice(0, 1200)}` : `AI HTTP ${status}`;
 }
 
