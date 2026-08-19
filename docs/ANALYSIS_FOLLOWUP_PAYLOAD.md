@@ -15,9 +15,12 @@ When `is_followup_enabled: false`, only that flag is sent (other blocks stripped
 ## Builder (Ondial_Webhook)
 
 - `lib/analysis_services/shared.js` — `buildBaseEnrichedFields` + `sanitizeAnalysisPayloadForV1Api`
+- `lib/analysis_services/whatsappSampleValues.js` — same Meta/AiSensy sample + description mapping as Calling_system1
 - `lib/triggerCallAnalysis.js` — loads `emailTemplates` + `whatsappTemplates` from Mongo before build
 
 WhatsApp templates resolve from `whatsapptemplates` then `platform_whatsapp_templates` (same as CS1).
+`description` is the template **body** (never `"Meta MARKETING"` / `"Meta UTILITY"`).
+`sample_values` fills from stored samples, Meta example components, platform presets, then contact/campaign context — never `"—"`.
 
 ## Outbound WhatsApp template shape (request)
 

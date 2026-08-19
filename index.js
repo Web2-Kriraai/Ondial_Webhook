@@ -33,8 +33,25 @@ const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
+const {
+    enqueueMetaWhatsappInbound,
+    closeMetaWhatsappInboundQueue,
+    getMetaWhatsappInboundQueueHealth,
+} = require("./metaInboundQueue");
+const {
+    startMetaWhatsappInboundWorker,
+    stopMetaWhatsappInboundWorker,
+    getMetaWhatsappInboundWorkerHealth,
+} = require("./whatsapp/metaInboundWorker");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
+const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
+const {
+    summarizeMetaWhatsappPayload,
+    shouldLogMetaWebhook,
+    metaWebhookIngressLog,
+} = require("./lib/metaWhatsappLogSummary");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
+const { processAisensyInboundSafe } = require("./whatsapp/processAisensyInbound");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
@@ -2374,17 +2391,25 @@ async function handlePoolConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(callKey, {
-        isTestCall:
-            storedDoc?.isTestCall === true ||
-            mapping?.is_test_call === true ||
-            inferIsTestCallFromWebhookBody(body),
-    }).catch((err) => {
-        logger.warn("[Pool] Analysis trigger failed after conversation store", {
-            call_id: callKey,
-            error: err.message,
+    // India/pool analysis is owned by Calling_system1 post-call.
+    // Optional safety net only: WEBHOOK_TRIGGER_INDIA_ANALYSIS=true (uses ANALYSIS_API_URL on this host).
+    if (
+        String(process.env.WEBHOOK_TRIGGER_INDIA_ANALYSIS || "")
+            .trim()
+            .toLowerCase() === "true"
+    ) {
+        triggerCallAnalysis(callKey, {
+            isTestCall:
+                storedDoc?.isTestCall === true ||
+                mapping?.is_test_call === true ||
+                inferIsTestCallFromWebhookBody(body),
+        }).catch((err) => {
+            logger.warn("[Pool] Analysis trigger failed after conversation store", {
+                call_id: callKey,
+                error: err.message,
+            });
         });
-    });
+    }
 
     logger.info("[Pool] Conversation stored", {
         call_id: callKey,
@@ -2598,7 +2623,7 @@ app.post("/api/inbound-mapping", async (req, res) => {
  * AiSensy provider ingress (canonical public URL):
  *   Live: https://api.ondial.ai/api/webhook/aisensy
  *   Test: https://dev-api.ondial.ai/api/webhook/aisensy
- * Enqueues to BullMQ `aisensy-inbound` for Calling_system1; updates marketing logs async.
+ * Enqueues to BullMQ `aisensy-inbound` (CS1 backup) and runs STOP + AI relay locally.
  */
 app.post("/api/webhook/aisensy", async (req, res) => {
     const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
@@ -2640,6 +2665,98 @@ app.post("/api/webhook/aisensy", async (req, res) => {
     res.status(200).json({ received: true });
 
     processAisensyMarketingWebhookSafe(payload);
+    processAisensyInboundSafe(payload);
+});
+
+/**
+ * Meta Cloud API WhatsApp ingress (canonical public URL):
+ *   Live: https://api.ondial.ai/api/webhook/whatsapp
+ *   Test: https://dev-api.ondial.ai/api/webhook/whatsapp
+ * GET: hub.verify_token challenge. POST: X-Hub-Signature-256 → BullMQ whatsapp-meta-inbound.
+ */
+app.get("/api/webhook/whatsapp", (req, res) => {
+    const mode = String(req.query["hub.mode"] || "").trim();
+    const token = String(req.query["hub.verify_token"] || "").trim();
+    const challenge = req.query["hub.challenge"];
+    const expected = String(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "").trim();
+
+    if (mode !== "subscribe") {
+        return res.status(400).send("Invalid mode");
+    }
+    if (!expected) {
+        logger.error("[MetaWhatsApp] WHATSAPP_WEBHOOK_VERIFY_TOKEN is not configured");
+        return res.status(503).send("Webhook verify token not configured");
+    }
+    if (token !== expected) {
+        logger.error("[MetaWhatsApp] Verification FAILED (token mismatch; token not logged)");
+        return res.status(403).send("Forbidden");
+    }
+    logger.info("[MetaWhatsApp] Verification passed via env token");
+    return res.status(200).send(String(challenge ?? ""));
+});
+
+app.post("/api/webhook/whatsapp", async (req, res) => {
+    const startedAt = Date.now();
+    const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
+    if (!appSecret) {
+        logger.error("[MetaWhatsApp] WHATSAPP_APP_SECRET is not configured — rejecting POST");
+        return res.status(503).json({ error: "Webhook not configured" });
+    }
+
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const signature =
+        req.headers["x-hub-signature-256"] || req.headers["X-Hub-Signature-256"];
+
+    if (!verifyMetaWhatsappSignature(rawBody, signature, appSecret)) {
+        logger.error("[MetaWhatsApp] Invalid X-Hub-Signature-256", {
+            hasSignature: Boolean(signature),
+            contentLength: rawBody?.length || 0,
+            sourceIp: req.ip,
+        });
+        return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const payload = req.body;
+    if (!payload || typeof payload !== "object") {
+        logger.error("[MetaWhatsApp] Invalid JSON body");
+        return res.status(400).json({ error: "Invalid JSON" });
+    }
+    if (payload.object !== "whatsapp_business_account") {
+        logger.warn("[MetaWhatsApp] Unsupported webhook object", {
+            object: payload.object || null,
+        });
+        return res.status(400).json({ error: "Unsupported webhook object" });
+    }
+
+    const summary = summarizeMetaWhatsappPayload(payload);
+
+    // Enqueue before ACK so Redis/BullMQ failures are not silently dropped after 200.
+    // Meta retries on non-2xx; stable jobId coalesces those retries.
+    try {
+        const enqueued = await enqueueMetaWhatsappInbound(payload, {
+            signaturePresent: Boolean(signature),
+            sourceIp: req.ip,
+            fields: summary.fields,
+        });
+        if (shouldLogMetaWebhook(summary)) {
+            const ingressLog = metaWebhookIngressLog(summary, {
+                jobId: enqueued?.jobId || null,
+                durationMs: Date.now() - startedAt,
+            });
+            if (ingressLog) {
+                logger[ingressLog.level](ingressLog.message, ingressLog.data);
+            }
+        }
+    } catch (err) {
+        logger.error("[MetaWhatsApp] enqueue failed", {
+            error: err.message,
+            fields: summary.fields,
+            durationMs: Date.now() - startedAt,
+        });
+        return res.status(503).json({ error: "Queue unavailable", detail: err.message });
+    }
+
+    return res.status(200).json({ received: true });
 });
 
 app.get("/health", (req, res) => {
@@ -2648,11 +2765,19 @@ app.get("/health", (req, res) => {
 
 app.get("/health/slo", async (req, res) => {
     try {
-        const queue = await getQueueLagSnapshot();
+        const [queue, metaWhatsappQueue, metaWhatsappWorker] = await Promise.all([
+            getQueueLagSnapshot(),
+            getMetaWhatsappInboundQueueHealth(),
+            Promise.resolve(getMetaWhatsappInboundWorkerHealth()),
+        ]);
         return res.json({
             status: "ok",
             time: new Date().toISOString(),
             webhookQueue: queue,
+            metaWhatsapp: {
+                ...metaWhatsappQueue,
+                worker: metaWhatsappWorker,
+            },
         });
     } catch (error) {
         return res.status(500).json({
@@ -2678,6 +2803,12 @@ async function start() {
             logger.error("Failed to start webhook workers", { error: err.message });
             process.exit(1);
         });
+        try {
+            startMetaWhatsappInboundWorker();
+        } catch (err) {
+            logger.error("Failed to start Meta WhatsApp inbound worker", { error: err.message });
+            process.exit(1);
+        }
         app.listen(PORT, "0.0.0.0", () => {
             logger.info(`Server started on port ${PORT}`);
         });
@@ -2695,7 +2826,9 @@ function setupShutdownHandlers() {
         logger.info("Shutdown signal received", { signal });
         try {
             await closeWebhookWorkers();
+            await stopMetaWhatsappInboundWorker();
             await closeAisensyInboundQueue();
+            await closeMetaWhatsappInboundQueue();
         } catch (err) {
             logger.error("Error closing webhook workers", { error: err.message });
         } finally {
