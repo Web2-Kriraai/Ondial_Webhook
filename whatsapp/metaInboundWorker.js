@@ -51,6 +51,8 @@ function startMetaWhatsappInboundWorker() {
 
       const fields = summarizePayloadFields(payload);
       const { inbound, statuses, templateStatuses } = await processMetaInboundPayload(payload);
+
+      if (templateStatuses?.processed > 0) {
         lastTemplateStatuses = {
           at: new Date().toISOString(),
           ...templateStatuses,
