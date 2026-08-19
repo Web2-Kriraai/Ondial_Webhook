@@ -360,6 +360,22 @@ function languageCode(value) {
   return raw.split(/[-_]/)[0].toLowerCase() || "en";
 }
 
+function toCallbackSchedulingPayload(campaign = {}, { followup, channels, extraStatus = false } = {}) {
+  const block = campaign.callbackScheduling || campaign.callback_scheduling || {};
+  let minDays = Math.floor(Number(block.minDays ?? block.min_days ?? 2));
+  let maxDays = Math.floor(Number(block.maxDays ?? block.max_days ?? 5));
+  if (!Number.isFinite(minDays) || minDays < 0) minDays = 2;
+  if (!Number.isFinite(maxDays) || maxDays < 1) maxDays = 5;
+  if (minDays > maxDays) maxDays = minDays;
+  const status =
+    extraStatus ||
+    (block.status !== false && followup === true && Array.isArray(channels) && channels.includes("call"));
+  return {
+    status: Boolean(status),
+    ...(status ? { min_days: minDays, max_days: maxDays } : {}),
+  };
+}
+
 function buildWhatsappAiReplyPayload({
   phone,
   message,
@@ -424,12 +440,13 @@ function buildWhatsappAiReplyPayload({
       features_enabled: {
         is_followup_enabled: followup,
         whatsapp_followup: { status: followup && channels.includes("whatsapp") },
-        callback_scheduling: {
-          status:
-            (followup && channels.includes("call")) ||
+        callback_scheduling: toCallbackSchedulingPayload(campaign, {
+          followup,
+          channels,
+          extraStatus:
             campaign?.appointmentsDemosEnabled === true ||
             callAnalysis.callback_requested.status === true,
-        },
+        }),
       },
       call_analysis: callAnalysis,
       inbound_message: String(message || "").trim(),
