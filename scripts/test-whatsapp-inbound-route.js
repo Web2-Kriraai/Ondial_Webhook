@@ -4,9 +4,12 @@ const {
   isFollowupSessionActive,
 } = require("../whatsapp/whatsappAiRelay");
 const {
+  isWhatsappConversationWindowOpen,
+} = require("../whatsapp/whatsappFollowupService");
+const {
   summarizeMetaWhatsappPayload,
   shouldLogMetaWebhook,
-  compactMetaWebhookLog,
+  metaWebhookIngressLog,
 } = require("../lib/metaWhatsappLogSummary");
 
 const now = Date.parse("2026-08-18T12:00:00.000Z");
@@ -80,12 +83,49 @@ const inboundPayload = {
 };
 const inboundSummary = summarizeMetaWhatsappPayload(inboundPayload);
 assert.equal(shouldLogMetaWebhook(inboundSummary), true);
-const inboundLog = compactMetaWebhookLog(inboundSummary, { jobId: "job-1" });
-assert.equal(inboundLog.from, "916353125194");
-assert.equal(inboundLog.text, "Okay");
-assert.equal(inboundLog.jobId, "job-1");
-assert.equal(inboundLog.wabaId, undefined);
-assert.equal(inboundLog.rawBytes, undefined);
+const inboundLog = metaWebhookIngressLog(inboundSummary, { jobId: "job-1" });
+assert.equal(inboundLog.message, "[MetaWhatsApp] inbound");
+assert.equal(inboundLog.data.from, "916353125194");
+assert.equal(inboundLog.data.text, "Okay");
+assert.equal(inboundLog.data.jobId, "job-1");
+assert.equal(inboundLog.data.failed, undefined);
+
+const failedPayload = {
+  entry: [
+    {
+      changes: [
+        {
+          field: "messages",
+          value: {
+            metadata: { phone_number_id: "1200331536506095" },
+            statuses: [
+              {
+                id: "wamid.x",
+                status: "failed",
+                recipient_id: "919979710905",
+                errors: [
+                  {
+                    code: 131049,
+                    title: "This message was not delivered to maintain healthy ecosystem engagement.",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+const failedSummary = summarizeMetaWhatsappPayload(failedPayload);
+assert.equal(shouldLogMetaWebhook(failedSummary), true);
+const failedLog = metaWebhookIngressLog(failedSummary, { jobId: "job-2" });
+assert.equal(failedLog.level, "warn");
+assert.equal(failedLog.message, "[MetaWhatsApp] delivery failed");
+assert.equal(failedLog.data.from, undefined);
+assert.equal(failedLog.data.text, undefined);
+assert.equal(failedLog.data.failed[0].recipient, "919979710905");
+assert.equal(failedLog.data.failed[0].errorCode, 131049);
 
 const statusOnly = summarizeMetaWhatsappPayload({
   entry: [
@@ -103,5 +143,27 @@ const statusOnly = summarizeMetaWhatsappPayload({
   ],
 });
 assert.equal(shouldLogMetaWebhook(statusOnly), false);
+
+assert.equal(
+  isWhatsappConversationWindowOpen({
+    conversationWindowOpensUntil: "2026-08-20T12:00:00.000Z",
+  }, Date.parse("2026-08-19T12:00:00.000Z")),
+  true,
+  "open while conversationWindowOpensUntil is in the future"
+);
+assert.equal(
+  isWhatsappConversationWindowOpen({
+    lastCustomerWhatsappReplyAt: "2026-08-19T11:00:00.000Z",
+  }, Date.parse("2026-08-19T12:00:00.000Z")),
+  true,
+  "open when customer replied within 24h"
+);
+assert.equal(
+  isWhatsappConversationWindowOpen({
+    lastCustomerWhatsappReplyAt: "2026-08-17T11:00:00.000Z",
+  }, Date.parse("2026-08-19T12:00:00.000Z")),
+  false,
+  "closed when last customer reply is older than 24h"
+);
 
 console.log("ok: last-touch inbound campaign routing");

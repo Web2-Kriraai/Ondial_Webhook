@@ -14,6 +14,10 @@ const {
 } = require("./whatsappAiReplyResponse");
 const { applyWhatsappCallbackUpdate } = require("./applyWhatsappCallbackUpdate");
 const { previewText } = require("../lib/metaWhatsappLogSummary");
+const {
+  sendWhatsappFollowup,
+  isWhatsappConversationWindowOpen,
+} = require("./whatsappFollowupService");
 
 const AI_TIMEOUT_MS = 30_000;
 
@@ -397,10 +401,64 @@ function isAiRelayEnabled(campaign) {
   return Boolean(campaign?.whatsappSettings?.aiMessageEnabled);
 }
 
-function isConversationWindowOpen(replyTimestamp) {
-  const sentAt = replyTimestamp instanceof Date ? replyTimestamp : new Date(replyTimestamp);
-  if (Number.isNaN(sentAt.getTime())) return false;
-  return Date.now() < sentAt.getTime() + 24 * 60 * 60 * 1000;
+function isConversationWindowOpenForReply(contact, inboundTimestamp) {
+  const now = Date.now();
+  const inboundMs = timeMs(inboundTimestamp) || now;
+
+  // Customer-initiated message opens/refreshes the 24h session window for our reply.
+  if (now - inboundMs <= 24 * 60 * 60 * 1000) return true;
+
+  return isWhatsappConversationWindowOpen(contact, now);
+}
+
+async function recordTemplateReengagement(db, { contact, session, result, kind = "window_closed_reengagement" }) {
+  if (!result?.success) {
+    if (session?.sessionKey) {
+      await db.collection("whatsapp_ai_sessions").updateOne(
+        { sessionKey: session.sessionKey },
+        { $set: { lastError: result.error || "template_send_failed", updatedAt: new Date() } }
+      );
+    }
+    return;
+  }
+
+  const bodyPreview = String(result.bodyPreview || "").trim() || "Template message sent";
+  if (session?.sessionKey) {
+    await appendSessionHistory(db, session.sessionKey, {
+      role: "assistant",
+      text: bodyPreview,
+      messageId: result.messageId || "",
+      isAiGenerated: false,
+      kind: result.kind || "template",
+    });
+  }
+
+  if (contact?._id) {
+    await db.collection("contactprocessings").updateOne(
+      { _id: contact._id },
+      {
+        $set: {
+          lastWhatsappSentAt: new Date(),
+          lastTemplateSentAt: new Date(),
+          whatsappMessageId: result.messageId || null,
+          whatsappQueueStatus: "WAITING_REPLY",
+          whatsappStatus: "sent",
+          whatsappError: null,
+          updatedAt: new Date(),
+        },
+        $push: {
+          whatsappHistory: {
+            direction: "outbound",
+            messageId: result.messageId || "",
+            type: "template",
+            text: bodyPreview,
+            timestamp: new Date(),
+            kind,
+          },
+        },
+      }
+    );
+  }
 }
 
 /**
@@ -533,25 +591,37 @@ async function relayInboundWhatsAppMessage(db, {
     return { handled: true, success: true, reason: "ai_relay_disabled", kind: "persisted_only" };
   }
 
-  if (!isConversationWindowOpen(timestamp)) {
-    const err = "conversation_window_closed";
-    logger.warn("[WhatsApp] inbound skipped", {
-      phone: phoneNorm,
-      reason: "conversation_window_closed",
-      campaignId: campaign?._id ? String(campaign._id) : null,
-    });
-    await db.collection("whatsapp_ai_sessions").updateOne(
-      { sessionKey: session.sessionKey },
-      { $set: { lastError: err, updatedAt: new Date() } }
-    );
-    return { handled: true, success: false, error: err, kind: "window_closed" };
-  }
-
   const analysis = await loadCallAnalysis(db, {
     session: fresh || session,
     contact,
     campaignId: campaign?._id,
   });
+
+  const windowOpen = isConversationWindowOpenForReply(contact, timestamp);
+  if (!windowOpen && user && campaign && contact) {
+    const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis });
+    await recordTemplateReengagement(db, {
+      contact,
+      session: fresh || session,
+      result: fallback,
+      kind: "window_closed_reengagement",
+    });
+    logger.info("[WhatsApp] template sent (window closed)", {
+      phone: phoneNorm,
+      campaignId: campaign?._id ? String(campaign._id) : null,
+      success: fallback.success,
+      error: fallback.error || null,
+      messageId: fallback.messageId || null,
+    });
+    return {
+      handled: true,
+      success: fallback.success,
+      error: fallback.success ? undefined : fallback.error,
+      kind: "window_closed_reengagement",
+      messageId: fallback.messageId || null,
+    };
+  }
+
   const callLogs = await loadCallLogsForContact(db, {
     session: fresh || session,
     analysis,
@@ -626,6 +696,30 @@ async function relayInboundWhatsAppMessage(db, {
   });
 
   if (!sendResult.success) {
+    if (sendResult.error === "conversation_window_closed" && user && campaign && contact) {
+      const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis });
+      await recordTemplateReengagement(db, {
+        contact,
+        session: fresh || session,
+        result: fallback,
+        kind: "session_failed_template_fallback",
+      });
+      logger.info("[WhatsApp] template sent (session fallback)", {
+        phone: phoneNorm,
+        campaignId: campaign?._id ? String(campaign._id) : null,
+        success: fallback.success,
+        error: fallback.error || null,
+      });
+      return {
+        handled: true,
+        success: fallback.success,
+        error: fallback.success ? undefined : fallback.error,
+        kind: "session_failed_template_fallback",
+        messageId: fallback.messageId || null,
+        reply: fallback.success ? fallback.bodyPreview || "" : "",
+      };
+    }
+
     logger.error("[WhatsApp] send failed", {
       phone: phoneNorm,
       campaignId: campaign?._id ? String(campaign._id) : null,

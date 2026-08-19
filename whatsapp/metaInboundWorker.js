@@ -51,28 +51,6 @@ function startMetaWhatsappInboundWorker() {
 
       const fields = summarizePayloadFields(payload);
       const { inbound, statuses, templateStatuses } = await processMetaInboundPayload(payload);
-      const failedStatuses = [];
-      try {
-        const { parseMetaStatusUpdates } = require("./metaStatusUpdates");
-        for (const u of parseMetaStatusUpdates(payload)) {
-          if (u.status === "failed") {
-            failedStatuses.push({
-              messageId: u.messageId,
-              error: u.error,
-            });
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-      if (failedStatuses.length) {
-        logger.warn("[MetaWhatsAppInbound] delivery failed", {
-          jobId: job.id,
-          failedStatuses,
-        });
-      }
-
-      if (templateStatuses?.processed > 0) {
         lastTemplateStatuses = {
           at: new Date().toISOString(),
           ...templateStatuses,

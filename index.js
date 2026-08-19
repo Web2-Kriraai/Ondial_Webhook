@@ -48,7 +48,7 @@ const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
 const {
     summarizeMetaWhatsappPayload,
     shouldLogMetaWebhook,
-    compactMetaWebhookLog,
+    metaWebhookIngressLog,
 } = require("./lib/metaWhatsappLogSummary");
 const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWebhook");
 const { processAisensyInboundSafe } = require("./whatsapp/processAisensyInbound");
@@ -2739,10 +2739,13 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             fields: summary.fields,
         });
         if (shouldLogMetaWebhook(summary)) {
-            logger.info("[MetaWhatsApp] inbound", compactMetaWebhookLog(summary, {
+            const ingressLog = metaWebhookIngressLog(summary, {
                 jobId: enqueued?.jobId || null,
                 durationMs: Date.now() - startedAt,
-            }));
+            });
+            if (ingressLog) {
+                logger[ingressLog.level](ingressLog.message, ingressLog.data);
+            }
         }
     } catch (err) {
         logger.error("[MetaWhatsApp] enqueue failed", {
