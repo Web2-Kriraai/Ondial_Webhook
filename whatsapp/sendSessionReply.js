@@ -1,4 +1,4 @@
-const { deductWhatsappCredits, getWhatsappSendCost } = require("./whatsappCredits");
+const { deductWhatsappCredits, getWhatsappSendCost, hasBilledWhatsappSessionInWindow } = require("./whatsappCredits");
 const {
   buildMetaClientFromProfile,
   getProfileAccessToken,
@@ -26,7 +26,10 @@ async function sendWhatsappSessionReply(db, {
   }
 
   const usesPlatform = Boolean(profile?.usesPlatformAccount ?? true);
-  const cost = await getWhatsappSendCost(db, usesPlatform, "session");
+  const alreadyBilled =
+    user &&
+    (await hasBilledWhatsappSessionInWindow(db, { user, contactId, phone }));
+  const cost = alreadyBilled ? 0 : await getWhatsappSendCost(db, usesPlatform, "session");
   if (cost > 0 && (Number(user?.credits) || 0) < cost) {
     return { success: false, error: "insufficient_credits" };
   }

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node scripts/test-callReceiveStatusPolicy.js && node scripts/test-billing-guards.js && node scripts/test-billing-call-id.js && node scripts/test-analysis-call-id.js && node scripts/test-inbound-doc-anchor.js && node scripts/test-country-pricing.js && node scripts/test-telnyx-webhook-parse.js && node scripts/test-telnyx-mapping-fallback.js && node scripts/test-provider-api-log.js && node scripts/test-meta-whatsapp-signature.js && node scripts/test-meta-whatsapp-enqueue-before-ack.js && node scripts/test-meta-inbound-parse.js && node --test scripts/test-whatsapp-sample-values.js",
+    "test": "node scripts/test-callReceiveStatusPolicy.js && node scripts/test-billing-guards.js && node scripts/test-billing-call-id.js && node scripts/test-analysis-call-id.js && node scripts/test-inbound-doc-anchor.js && node scripts/test-country-pricing.js && node scripts/test-telnyx-webhook-parse.js && node scripts/test-telnyx-mapping-fallback.js && node scripts/test-provider-api-log.js && node scripts/test-meta-whatsapp-signature.js && node scripts/test-meta-whatsapp-enqueue-before-ack.js && node scripts/test-meta-inbound-parse.js && node scripts/test-whatsapp-inbound-route.js && node scripts/test-whatsapp-session-billing.js && node --test scripts/test-whatsapp-sample-values.js",
     "test:e2e": "node scripts/test-billing-e2e.js && node scripts/test-telnyx-http-e2e.js",
     "check:telnyx": "node scripts/check-telnyx-preflight.js"
   },

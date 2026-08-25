@@ -125,17 +125,42 @@ function historyForAi(session, limit = 100) {
   }));
 }
 
-async function findLatestSessionByPhone(db, phone) {
+function phoneSessionVariants(phone) {
   const normalized = String(phone || "").replace(/[\s+\-()]/g, "");
-  if (!normalized) return null;
+  if (!normalized) return [];
   const variants = [normalized, `+${normalized}`];
   if (normalized.startsWith("91") && normalized.length === 12) {
     variants.push(normalized.slice(2));
   }
+  return variants;
+}
+
+async function findLatestSessionByPhone(db, phone) {
+  const variants = phoneSessionVariants(phone);
+  if (!variants.length) return null;
   return db.collection("whatsapp_ai_sessions").findOne(
     { phone: { $in: variants } },
     { sort: { updatedAt: -1 } }
   );
+}
+
+async function findLatestOpenSessionByPhone(db, phone) {
+  const variants = phoneSessionVariants(phone);
+  if (!variants.length) return null;
+  return db.collection("whatsapp_ai_sessions").findOne(
+    {
+      phone: { $in: variants },
+      $or: [{ closedAt: { $exists: false } }, { closedAt: null }],
+    },
+    { sort: { lastOutboundAt: -1, updatedAt: -1 } }
+  );
+}
+
+async function findSessionByCampaign(db, phone, campaignId) {
+  if (!campaignId) return null;
+  return db.collection("whatsapp_ai_sessions").findOne({
+    sessionKey: buildSessionKey(phone, campaignId),
+  });
 }
 
 module.exports = {
@@ -144,4 +169,6 @@ module.exports = {
   appendSessionHistory,
   historyForAi,
   findLatestSessionByPhone,
+  findLatestOpenSessionByPhone,
+  findSessionByCampaign,
 };

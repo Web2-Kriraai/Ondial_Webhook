@@ -3,6 +3,8 @@
  * All production calls for the contact (oldest → newest) + WhatsApp history.
  */
 
+const { resolveCampaignIntlTimeZoneId } = require("./campaignIntlTimeZone");
+
 const MAX_CALLS_FOR_AI = 20;
 
 function toIso(value) {
@@ -143,7 +145,7 @@ function callTurnsFromAnalysis(analysis) {
 }
 
 function isGroupedCallConversation(raw) {
-  return Boolean(raw && typeof raw === "object" && (Array.isArray(raw.turns) || raw.callId));
+  return Boolean(raw && typeof raw === "object" && (Array.isArray(raw.turns) || raw.callId || raw.call_id));
 }
 
 function normalizeExplicitCallConversation(raw) {
@@ -151,7 +153,7 @@ function normalizeExplicitCallConversation(raw) {
   if (isGroupedCallConversation(raw[0])) {
     return raw
       .map((group) => ({
-        callId: group.callId ? String(group.callId) : null,
+        callId: String(group.callId || group.call_id || "").trim() || null,
         callStartedAt: toIso(group.callStartedAt),
         callEndedAt: toIso(group.callEndedAt),
         turns: (group.turns || []).map(conversationTurn).filter(Boolean),
@@ -186,6 +188,58 @@ function callConversationForAi({ callLogs, callLog, analysis, callConversation }
   ];
 }
 
+function withTurnTimestamps(turns, startIso) {
+  const parsed = Date.parse(String(startIso || ""));
+  const base = Number.isNaN(parsed) ? Date.now() : parsed;
+  return (turns || []).map((turn, index) => {
+    const timestamp = toIso(turn.timestamp) || new Date(base + index * 4000).toISOString();
+    return {
+      role: turn.role,
+      text: turn.text,
+      timestamp,
+    };
+  });
+}
+
+function pythonCallConversation(groups) {
+  return (groups || [])
+    .map((group, index) => {
+      const callId = String(group.call_id || group.callId || "").trim() || `call-${index + 1}`;
+      const start = group.callStartedAt || group.call_started_at || group.turns?.[0]?.timestamp;
+      const turns = withTurnTimestamps(group.turns, start);
+      if (!turns.length) return null;
+      return { call_id: callId, turns };
+    })
+    .filter(Boolean);
+}
+
+function pythonWhatsappHistory(history) {
+  return withTurnTimestamps(history || [], new Date().toISOString());
+}
+
+function matchingCallId(preferred, pythonCalls) {
+  const ids = (pythonCalls || []).map((row) => String(row.call_id || "").trim()).filter(Boolean);
+  const want = String(preferred || "").trim();
+  if (want && ids.includes(want)) return want;
+  return ids.length ? ids[ids.length - 1] : want || null;
+}
+
+function resolveCompanyName(campaign, knowledgeBase) {
+  const named = asTrimmed(
+    campaign?.companyName || campaign?.selectedCompanyName || campaign?.company?.name,
+    120
+  );
+  if (named) return named;
+  const kb = String(knowledgeBase || campaign?.knowledgeBaseSummarized || "").trim();
+  if (kb) {
+    const beforeIs = kb.split(/\s+is\s+/i)[0].trim();
+    if (beforeIs && beforeIs.length <= 80) return beforeIs;
+    const words = kb.split(/\s+/).slice(0, 3).join(" ").trim();
+    if (words) return words;
+  }
+  return "OnDial";
+}
+
 function buildSessionKey(phone, campaignId) {
   const p = String(phone || "").replace(/[\s+\-()]/g, "");
   const c = campaignId ? String(campaignId) : "none";
@@ -217,36 +271,40 @@ function weekdayHours(businessHours) {
 function formatZonedDateTime(value, timeZone) {
   const date = value instanceof Date ? value : value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return null;
-  const tz = String(timeZone || "Asia/Kolkata").trim() || "UTC";
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(date)
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value])
-  );
-  const asUtc = Date.UTC(
-    Number(parts.year),
-    Number(parts.month) - 1,
-    Number(parts.day),
-    Number(parts.hour),
-    Number(parts.minute),
-    Number(parts.second)
-  );
-  const offsetMin = Math.round((asUtc - date.getTime()) / 60000);
-  const sign = offsetMin >= 0 ? "+" : "-";
-  const abs = Math.abs(offsetMin);
-  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
-  const mm = String(abs % 60).padStart(2, "0");
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${hh}:${mm}`;
+  const tz = resolveCampaignIntlTimeZoneId(timeZone);
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(date)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value])
+    );
+    const asUtc = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+    const offsetMin = Math.round((asUtc - date.getTime()) / 60000);
+    const sign = offsetMin >= 0 ? "+" : "-";
+    const abs = Math.abs(offsetMin);
+    const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+    const mm = String(abs % 60).padStart(2, "0");
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${sign}${hh}:${mm}`;
+  } catch {
+    return date.toISOString();
+  }
 }
 
 function firstName(value) {
@@ -302,6 +360,22 @@ function languageCode(value) {
   return raw.split(/[-_]/)[0].toLowerCase() || "en";
 }
 
+function toCallbackSchedulingPayload(campaign = {}, { followup, channels, extraStatus = false } = {}) {
+  const block = campaign.callbackScheduling || campaign.callback_scheduling || {};
+  let minDays = Math.floor(Number(block.minDays ?? block.min_days ?? 2));
+  let maxDays = Math.floor(Number(block.maxDays ?? block.max_days ?? 5));
+  if (!Number.isFinite(minDays) || minDays < 0) minDays = 2;
+  if (!Number.isFinite(maxDays) || maxDays < 1) maxDays = 5;
+  if (minDays > maxDays) maxDays = minDays;
+  const status =
+    extraStatus ||
+    (block.status !== false && followup === true && Array.isArray(channels) && channels.includes("call"));
+  return {
+    status: Boolean(status),
+    ...(status ? { min_days: minDays, max_days: maxDays } : {}),
+  };
+}
+
 function buildWhatsappAiReplyPayload({
   phone,
   message,
@@ -316,8 +390,8 @@ function buildWhatsappAiReplyPayload({
   callEndedAt,
 } = {}) {
   const grouped = callConversationForAi({ callLogs, callLog, analysis, callConversation });
-  const latest = grouped.length ? grouped[grouped.length - 1] : null;
-  const timezone = String(campaign?.timezone || "Asia/Kolkata").trim() || "Asia/Kolkata";
+  const pythonCalls = pythonCallConversation(grouped);
+  const timezone = resolveCampaignIntlTimeZoneId(campaign?.timezone || "Asia/Kolkata");
   const campaignId = campaign?._id ? String(campaign._id) : null;
   const phoneNorm = String(phone || "").trim();
   const callAnalysis = callAnalysisBlock(analysis);
@@ -327,10 +401,7 @@ function buildWhatsappAiReplyPayload({
     (Array.isArray(campaign?.selectedServices) && campaign.selectedServices[0]) || ""
   );
   const subServiceId = String(campaign?.campaignServiceSubId || "");
-  const serviceId =
-    wizardServiceId && subServiceId
-      ? `${wizardServiceId}.${subServiceId}`
-      : wizardServiceId || subServiceId;
+  const knowledgeBase = asTrimmed(campaign?.knowledgeBaseSummarized, 1500);
 
   return {
     payload: {
@@ -341,20 +412,21 @@ function buildWhatsappAiReplyPayload({
         : session?.contactId
           ? String(session.contactId)
           : null,
-      call_id:
-        analysis?.call_id || analysis?.callId || session?.callId || latest?.callId || null,
+      call_id: matchingCallId(
+        analysis?.call_id || analysis?.callId || session?.callId,
+        pythonCalls
+      ),
       wizard_service_id: wizardServiceId,
       sub_service_id: subServiceId,
-      service_id: serviceId,
       current_time: formatZonedDateTime(new Date(), timezone),
       timezone,
       language: languageCode(campaign?.primaryLanguage),
       contact: {
-        name: contactNameFromDoc(contact) || firstName(session?.userName),
+        name: contactNameFromDoc(contact) || firstName(session?.userName) || "there",
         mobile: phoneNorm,
       },
       company: {
-        name: asTrimmed(campaign?.companyName, 120),
+        name: resolveCompanyName(campaign, knowledgeBase),
         description: asTrimmed(campaign?.companyDescription, 800),
         business_hours: asTrimmed(
           weekdayHours(campaign?.businessHours) || weekdayHours(campaign?.callingHours?.schedule),
@@ -362,23 +434,24 @@ function buildWhatsappAiReplyPayload({
         ),
       },
       agent: {
-        name: asTrimmed(campaign?.agentName, 80),
+        name: asTrimmed(campaign?.agentName, 80) || "our team",
       },
-      knowledge_base_summary: asTrimmed(campaign?.knowledgeBaseSummarized, 1500),
+      knowledge_base_summary: knowledgeBase,
       features_enabled: {
         is_followup_enabled: followup,
         whatsapp_followup: { status: followup && channels.includes("whatsapp") },
-        callback_scheduling: {
-          status:
-            (followup && channels.includes("call")) ||
+        callback_scheduling: toCallbackSchedulingPayload(campaign, {
+          followup,
+          channels,
+          extraStatus:
             campaign?.appointmentsDemosEnabled === true ||
             callAnalysis.callback_requested.status === true,
-        },
+        }),
       },
       call_analysis: callAnalysis,
       inbound_message: String(message || "").trim(),
-      call_conversation: grouped,
-      whatsapp_history: conversationForAi(session, contact),
+      call_conversation: pythonCalls,
+      whatsapp_history: pythonWhatsappHistory(conversationForAi(session, contact)),
     },
   };
 }
@@ -387,5 +460,6 @@ module.exports = {
   buildWhatsappAiReplyPayload,
   conversationForAi,
   callConversationForAi,
+  formatZonedDateTime,
   MAX_CALLS_FOR_AI,
 };

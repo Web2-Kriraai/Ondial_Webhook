@@ -115,12 +115,15 @@ function parseSingleInbound(event) {
     if (SKIP_TYPES.has(type)) return null;
     const text = extractTextFromMetaMessage(event);
     if (!text) return null;
+    const meta = event._metaValue?.metadata || {};
     return {
       phone: normalizeWebhookPhone(event.from),
       text,
       type,
       messageId: String(event.id || event.messageId || ""),
       timestamp: parseTimestamp(event.timestamp),
+      phoneNumberId: String(meta.phone_number_id || ""),
+      displayPhoneNumber: String(meta.display_phone_number || ""),
       raw: event,
     };
   }

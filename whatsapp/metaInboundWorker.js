@@ -50,33 +50,7 @@ function startMetaWhatsappInboundWorker() {
       }
 
       const fields = summarizePayloadFields(payload);
-      logger.info("[MetaWhatsAppInbound] job started", {
-        jobId: job?.id,
-        attempt: job?.attemptsMade,
-        fields,
-      });
-
       const { inbound, statuses, templateStatuses } = await processMetaInboundPayload(payload);
-      const failedStatuses = [];
-      try {
-        const { parseMetaStatusUpdates } = require("./metaStatusUpdates");
-        for (const u of parseMetaStatusUpdates(payload)) {
-          if (u.status === "failed") {
-            failedStatuses.push({
-              messageId: u.messageId,
-              error: u.error,
-            });
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-      if (failedStatuses.length) {
-        logger.warn("[MetaWhatsAppInbound] delivery failed", {
-          jobId: job.id,
-          failedStatuses,
-        });
-      }
 
       if (templateStatuses?.processed > 0) {
         lastTemplateStatuses = {
@@ -109,7 +83,6 @@ function startMetaWhatsappInboundWorker() {
         statusUpdates: statuses?.processed ?? null,
         templateUpdates: templateStatuses?.processed ?? 0,
       };
-      logger.info("[MetaWhatsAppInbound] job completed", lastJobSummary);
       return result;
     },
     {
