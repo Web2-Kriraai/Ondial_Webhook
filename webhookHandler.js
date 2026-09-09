@@ -329,6 +329,62 @@ async function processOutboundHangupBilling({
         ...creditResult,
     });
 
+    // Backup tenant CRM notify when charge was already recorded (early return paths).
+    if (creditResult?.outcome === "already_billed") {
+        try {
+            const {
+                notifyTenantCallBilled,
+                notifyTenantCallStatus,
+            } = require("./lib/notifyTenantCallStatus");
+            const { getDb } = require("./db");
+            const db = getDb();
+            let ownerId = null;
+            if (campaignIdForCredit) {
+                let campOid = campaignIdForCredit;
+                try {
+                    const { ObjectId } = require("mongodb");
+                    if (ObjectId.isValid(String(campaignIdForCredit))) {
+                        campOid = new ObjectId(String(campaignIdForCredit));
+                    }
+                } catch {
+                    /* keep string */
+                }
+                const camp = await db.collection("campaigns").findOne({ _id: campOid });
+                if (camp?.userId) ownerId = camp.userId;
+                else if (camp?.createdBy) {
+                    const u = await db.collection("users").findOne({ email: camp.createdBy });
+                    ownerId = u?._id || null;
+                }
+            }
+            if (ownerId) {
+                const billedRes = await notifyTenantCallBilled({
+                    userId: ownerId,
+                    contactId: effectiveContactId || null,
+                    campaignId: campaignIdForCredit,
+                    callId: callUniqueForFinalize,
+                    creditsCharged: creditResult.cost ?? null,
+                    balanceAfter: null,
+                });
+                if (!billedRes?.ok) {
+                    logger.warn("[Webhook] backup tenant billed notify not ok", billedRes);
+                }
+                await notifyTenantCallStatus({
+                    userId: ownerId,
+                    contactId: effectiveContactId || null,
+                    campaignId: campaignIdForCredit,
+                    callId: callUniqueForFinalize,
+                    callReceiveStatus: 3,
+                    status: "completed",
+                });
+            }
+        } catch (backupNotifyErr) {
+            logger.warn("[Webhook] backup tenant billed notify failed", {
+                error: backupNotifyErr?.message || String(backupNotifyErr),
+                call_id: callUniqueForFinalize,
+            });
+        }
+    }
+
     const billed =
         creditResult.outcome === "deducted" || creditResult.outcome === "already_billed";
     const mirror = {
