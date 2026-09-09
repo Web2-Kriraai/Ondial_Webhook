@@ -1028,7 +1028,28 @@ async function handleEventWebhook(body) {
         }
 
         case "call_hangup": {
-            const dur = parseInt(duration, 10) || 0;
+            let dur = parseInt(duration, 10) || 0;
+            // Provider may send durationSec:0 on short answered calls — recover from clock/legs.
+            if (dur <= 0) {
+                const recovered = deriveDurationSec(
+                    {
+                        durationSec: body?.duration ?? body?._raw?.call?.durationSec,
+                        answeredAt:
+                            body?._raw?.call?.answeredAt ||
+                            body?.answeredAt ||
+                            null,
+                        endedAt: body?._raw?.call?.endedAt || body?.endedAt || null,
+                    },
+                    Array.isArray(body?.legs) ? body.legs : body?._raw?.legs
+                );
+                if (recovered != null && recovered > 0) {
+                    dur = recovered;
+                    logger.info("[Webhook] hangup duration recovered from answered/ended/legs", {
+                        call_id: call_id || docKey,
+                        durationSec: dur,
+                    });
+                }
+            }
 
             // Provider-authoritative status when present (new provider sends callStatus + answered flag).
             // Fall back to Redis answered-flag + event-history scan only when callStatus is absent.
@@ -1364,14 +1385,37 @@ function isNewProviderShape(body) {
     );
 }
 
-function deriveDurationSec(call) {
-    if (call.durationSec != null && !Number.isNaN(Number(call.durationSec))) {
-        return Number(call.durationSec);
+/**
+ * Provider often sends durationSec: 0 on short answered calls while answeredAt/endedAt
+ * (or legs) still show talk time. Prefer any positive clock/leg duration over a zero report.
+ */
+function deriveDurationSec(call, legs) {
+    const candidates = [];
+    const pushSec = (sec) => {
+        if (sec == null || Number.isNaN(Number(sec))) return;
+        const n = Number(sec);
+        if (Number.isFinite(n) && n >= 0) candidates.push(n);
+    };
+    const pushFromRange = (startIso, endIso) => {
+        if (!startIso || !endIso) return;
+        const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+        if (!Number.isFinite(ms) || ms < 0) return;
+        // Ceil so sub-second answered legs (e.g. 698ms) still bill 1s.
+        pushSec(Math.max(0, Math.ceil(ms / 1000)));
+    };
+
+    if (call?.durationSec != null) pushSec(call.durationSec);
+    pushFromRange(call?.answeredAt, call?.endedAt);
+
+    if (Array.isArray(legs)) {
+        for (const leg of legs) {
+            pushFromRange(leg?.answerTime || leg?.answeredAt, leg?.endTime || leg?.endedAt);
+        }
     }
-    if (call.answeredAt && call.endedAt) {
-        const ms = new Date(call.endedAt).getTime() - new Date(call.answeredAt).getTime();
-        if (Number.isFinite(ms) && ms >= 0) return Math.floor(ms / 1000);
-    }
+
+    const positive = candidates.filter((n) => n > 0);
+    if (positive.length) return Math.max(...positive);
+    if (candidates.length) return Math.max(0, ...candidates);
     return null;
 }
 
@@ -1400,12 +1444,12 @@ function normalizeWebhookPayload(body) {
     });
 
     const normEvent = NEW_EVENT_MAP[body.event] || body.event;
-    const durationSec = deriveDurationSec(c);
     const transferTarget =
         pickNonEmpty(c.transferTarget, c.transfer_target, c.transferNumber, c.transfer_number) ||
         null;
     const transferAt = pickNonEmpty(c.transferAt, c.transfer_at) || null;
     const legs = Array.isArray(body.legs) ? body.legs : undefined;
+    const durationSec = deriveDurationSec(c, legs);
 
     return {
         event: normEvent,
