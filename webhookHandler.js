@@ -128,6 +128,25 @@ async function updateByContactId(contactId, newStatus, context = "") {
                         userId,
                         callReceiveStatus: newStatus,
                         campaignId: doc?.campaignId,
+                        callId: await (async () => {
+                            try {
+                                const log = await db.collection("CallLogs").findOne(
+                                    {
+                                        $or: [
+                                            { contact_id: cid },
+                                            { contact_id: oid },
+                                        ],
+                                    },
+                                    {
+                                        sort: { updatedAt: -1, _id: -1 },
+                                        projection: { call_id: 1, call_unique_id: 1 },
+                                    }
+                                );
+                                return log?.call_unique_id || log?.call_id || null;
+                            } catch {
+                                return null;
+                            }
+                        })(),
                     });
                 } catch (_) { /* non-fatal */ }
                 return { applied: true, blocked: false, effectiveStatus: newStatus, contactId: cid };
