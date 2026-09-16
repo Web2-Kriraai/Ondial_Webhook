@@ -148,6 +148,8 @@ if ! live_health || ! pm2_online; then
 fi
 
 pm2_as_user "pm2 save"
+# Leave BUILD_DIR before deleting it (avoids uv_cwd / ENOENT after switch)
+cd /tmp
 sudo rm -rf "$BUILD_DIR"
 echo "SUCCESS sha=$SHA"
 pm2_as_user "pm2 list"
