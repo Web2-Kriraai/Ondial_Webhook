@@ -42,6 +42,10 @@ const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
 const { mapCdrSummaryToReceiveStatus } = require("./lib/cdrSummaryStatus");
 const { buildCallReceiveStatusUpdateFilter, shouldBlockDowngradeFromFinal } = require("./lib/callReceiveStatusPolicy");
 const { notifyTenantCallStatus } = require("./lib/notifyTenantCallStatus");
+const {
+    callLogShowsConversationTurns,
+    callLogShowsAnsweredEvidence,
+} = require("./lib/callAnsweredEvidence");
 
 /**
  * callReceiveStatus values:
@@ -745,8 +749,8 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     const normCallId = normalizeCallId(callId);
     if (looksLikeCallUniqueId(normCallId) || looksLikeCallUniqueId(precomputed?.call_unique_id)) {
         logger.error(
-            `[Webhook] Refusing phone fallback — call_unique_id=${normCallId} has no contact_id (wrong-contact risk)`,
-            { context, to: mobileRaw || null }
+            `[Webhook] hard miss — UUID call_unique_id=${normCallId} has no contact_id after CallLog enrich (refusing phone fallback)`,
+            { context, to: mobileRaw || null, campaign_id: campaign_id || null }
         );
         emitCallUpdateSse({
             call_id: callId,
@@ -803,18 +807,46 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
         const normalized = normalizeCallId(callId);
         if (!normalized) return false;
 
+        // Redis answered flag set on call_answered / pool conversation promote.
+        if (await hasAnsweredFlag(normalized, toPhone)) {
+            return true;
+        }
+
         const isInbound = collectionName === INBOUNDCALLLOG_COLLECTION;
         let doc = null;
 
         if (isInbound) {
             doc = await db.collection(collectionName).findOne(
                 { call_id: normalized },
-                { projection: { "call_data.events": 1 } }
+                {
+                    projection: {
+                        "call_data.events": 1,
+                        conversation: 1,
+                        pool: 1,
+                        twilio: 1,
+                        telnyx: 1,
+                    },
+                }
             );
         } else if (hasLeadId(leadId)) {
             doc = await db.collection(collectionName || "CallLogs").findOne(
                 { lead_id: String(leadId) },
-                { projection: { "call_data.events": 1 } }
+                {
+                    projection: {
+                        "call_data.events": 1,
+                        conversation: 1,
+                        pool: 1,
+                        twilio: 1,
+                        telnyx: 1,
+                    },
+                }
+            );
+        }
+        if (!doc) {
+            doc = await findOneCallLogByIdentity(
+                db.collection(collectionName || CALLLOGS_COLLECTION),
+                normalized,
+                { includeCarrier: false, limitPerQuery: 1 }
             );
         }
 
@@ -822,20 +854,83 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
         const slice = isInbound ? events : sliceEventsForThisCallLeg(events, normalized);
         const normTo = toPhone ? normalizePhone(toPhone) : null;
 
-        return slice.some((e) => {
-            const ty = String(e?.event_type || "").toLowerCase();
-            // Transfer implies the A-leg was already answered and bridged to a human.
-            if (ty !== "call_answered" && ty !== "call_transfer" && ty !== "call.transfer") {
+        // Event-level match for this leg (answered / transfer / pool conversation).
+        if (
+            slice.some((e) => {
+                const ty = String(e?.event_type || "").toLowerCase();
+                const isAnswerEv =
+                    ty === "call_answered" ||
+                    ty === "call_transfer" ||
+                    ty === "call.transfer" ||
+                    ty.includes("pool_conversation");
+                if (!isAnswerEv) return false;
+                if (eventCallIdFromPayload(e) === normalized) return true;
+                if (normTo && normalizePhone(e?.data?.to) === normTo) return true;
+                // pool_conversation_upserted often only carries call_id in data
+                if (ty.includes("pool_conversation") && !eventCallIdFromPayload(e)) return true;
                 return false;
-            }
-            if (eventCallIdFromPayload(e) === normalized) return true;
-            if (normTo && normalizePhone(e?.data?.to) === normTo) return true;
-            return false;
-        });
+            })
+        ) {
+            return true;
+        }
+
+        // Turns prove talking even if call_answered webhook was lost.
+        if (callLogShowsAnsweredEvidence(doc, { eventsSlice: slice })) {
+            return true;
+        }
+        if (callLogShowsConversationTurns(doc)) {
+            return true;
+        }
+        return false;
     } catch (err) {
         logger.warn(`[Webhook] didCallReachAnsweredStage lookup failed: ${err.message}`);
         return false;
     }
+}
+
+/**
+ * India/pool: conversation turns mean the call is live — promote CRS=2.
+ * Does not trigger Analysis API (CS1 owns India analysis).
+ */
+async function promotePoolConversationAnswered({
+    contactId,
+    campaignId = null,
+    callId,
+    toPhone = null,
+    turnCount = null,
+}) {
+    const cid = contactId != null ? String(contactId).trim() : "";
+    const key = normalizeCallId(callId);
+    if (!cid || !key) {
+        logger.warn("[Webhook] promotePoolConversationAnswered skipped — missing contact or call id", {
+            contact_id: cid || null,
+            call_id: key || null,
+        });
+        return { applied: false, reason: "missing_identity" };
+    }
+
+    try {
+        await markCallAnswered(key, toPhone);
+    } catch (err) {
+        logger.warn(`[Webhook] markCallAnswered failed for pool conversation: ${err.message}`, {
+            call_id: key,
+        });
+    }
+
+    const updateResult = await updateByContactId(cid, 2, "pool_conversation");
+    const emittedStatus = Number.isFinite(updateResult?.effectiveStatus)
+        ? updateResult.effectiveStatus
+        : 2;
+    emitCallUpdateSse({
+        campaign_id: campaignId || null,
+        call_id: key,
+        contact_id: cid,
+        status: emittedStatus,
+        event: "pool_conversation",
+        provider: "pool",
+        ...(turnCount != null ? { turnCount } : {}),
+    });
+    return updateResult || { applied: false };
 }
 
 // ─── Event Webhook Handler ────────────────────────────────────────────────────
@@ -1584,7 +1679,13 @@ async function handleWebhook(body, meta = {}) {
     }
 }
 
-module.exports = { handleWebhook };
+module.exports = {
+    handleWebhook,
+    updateByContactId,
+    didCallReachAnsweredStage,
+    promotePoolConversationAnswered,
+    enrichIdentityFromCallLog,
+};
 
 async function beginDedupeProcessing(key) {
     const redis = getRedis();

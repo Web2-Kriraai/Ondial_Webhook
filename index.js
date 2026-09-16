@@ -2381,18 +2381,87 @@ async function handlePoolConversation(req, res) {
         { includeCarrier: false, limitPerQuery: 1 }
     );
 
-    emitCallUpdateSse({
-        campaign_id: storedDoc?.campaign_id || campaignId || null,
-        call_id: storedDoc?.call_unique_id || storedDoc?.call_id || callKey,
-        contact_id: storedDoc?.contact_id || contactId || null,
-        status: null,
-        event: "pool_conversation",
-        provider: "pool",
-        turnCount: normalizedConversation.turns.length,
-    });
+    // Resolve contact/campaign from CallLog when payload/mapping omitted them.
+    let effectiveContactId =
+        (contactId && String(contactId).trim()) ||
+        (storedDoc?.contact_id != null && String(storedDoc.contact_id).trim()) ||
+        "";
+    let effectiveCampaignId =
+        (campaignId && String(campaignId).trim()) ||
+        (storedDoc?.campaign_id != null && String(storedDoc.campaign_id).trim()) ||
+        "";
+
+    const { promotePoolConversationAnswered, enrichIdentityFromCallLog } = require("./webhookHandler");
+    if (!effectiveContactId) {
+        try {
+            const enriched = await enrichIdentityFromCallLog({
+                contact_id: null,
+                campaign_id: effectiveCampaignId || null,
+                lead_id: leadId || callKey,
+                normalizedCallId: callKey,
+                call_unique_id: callKey,
+            });
+            if (enriched?.contact_id) {
+                effectiveContactId = String(enriched.contact_id).trim();
+            }
+            if (!effectiveCampaignId && enriched?.campaign_id) {
+                effectiveCampaignId = String(enriched.campaign_id).trim();
+            }
+        } catch (err) {
+            logger.warn("[Pool] enrichIdentityFromCallLog failed", {
+                call_id: callKey,
+                error: err.message,
+            });
+        }
+    }
+
+    let crsPromote = null;
+    if (normalizedConversation.turns.length > 0 && effectiveContactId) {
+        try {
+            crsPromote = await promotePoolConversationAnswered({
+                contactId: effectiveContactId,
+                campaignId: effectiveCampaignId || null,
+                callId: callKey,
+                toPhone: toPhone || storedDoc?.to_number || null,
+                turnCount: normalizedConversation.turns.length,
+            });
+        } catch (err) {
+            logger.warn("[Pool] CRS=2 promote failed after conversation store", {
+                call_id: callKey,
+                contact_id: effectiveContactId,
+                error: err.message,
+            });
+        }
+    } else if (normalizedConversation.turns.length > 0 && !effectiveContactId) {
+        logger.error("[Pool] hard miss — pool conversation has turns but no contact_id on payload/mapping/CallLog", {
+            call_id: callKey,
+            collection: matchedCollection,
+            campaign_id: effectiveCampaignId || null,
+        });
+        emitCallUpdateSse({
+            campaign_id: effectiveCampaignId || null,
+            call_id: storedDoc?.call_unique_id || storedDoc?.call_id || callKey,
+            contact_id: null,
+            status: null,
+            event: "pool_conversation",
+            provider: "pool",
+            turnCount: normalizedConversation.turns.length,
+        });
+    } else {
+        emitCallUpdateSse({
+            campaign_id: effectiveCampaignId || storedDoc?.campaign_id || null,
+            call_id: storedDoc?.call_unique_id || storedDoc?.call_id || callKey,
+            contact_id: effectiveContactId || storedDoc?.contact_id || null,
+            status: null,
+            event: "pool_conversation",
+            provider: "pool",
+            turnCount: normalizedConversation.turns.length,
+        });
+    }
 
     // India/pool analysis is owned by Calling_system1 post-call.
     // Optional safety net only: WEBHOOK_TRIGGER_INDIA_ANALYSIS=true (uses ANALYSIS_API_URL on this host).
+    // Do NOT enable in prod for India — wrong Analysis host (foreignscript) and duplicate risk.
     if (
         String(process.env.WEBHOOK_TRIGGER_INDIA_ANALYSIS || "")
             .trim()
@@ -2415,9 +2484,11 @@ async function handlePoolConversation(req, res) {
         call_id: callKey,
         turnCount: normalizedConversation.turns.length,
         collection: matchedCollection,
-        campaign_id: campaignId || null,
-        contact_id: contactId || null,
+        campaign_id: effectiveCampaignId || null,
+        contact_id: effectiveContactId || null,
         hadMapping: !!mapping,
+        crsPromoteApplied: crsPromote?.applied === true,
+        crsEffectiveStatus: crsPromote?.effectiveStatus ?? null,
     });
 
     return res.status(200).json({
@@ -2427,6 +2498,7 @@ async function handlePoolConversation(req, res) {
         call_id: callKey,
         turnCount: normalizedConversation.turns.length,
         collection: matchedCollection,
+        callReceiveStatus: crsPromote?.effectiveStatus ?? (crsPromote?.applied ? 2 : null),
     });
 }
 
