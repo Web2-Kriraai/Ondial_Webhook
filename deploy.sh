@@ -90,12 +90,14 @@ if [ -d "$TARGET_DIR/.git" ]; then
 fi
 
 cd "$BUILD_DIR"
+export HOME="${HOME:-/home/${PM2_USER}}"
 REPO_URL="https://${TOKEN}@github.com/${REPO_SLUG}.git"
 sudo git remote set-url origin "$REPO_URL"
 sudo git fetch origin
 CURRENT_BRANCH=$(sudo git rev-parse --abbrev-ref HEAD)
-sudo git checkout "$CURRENT_BRANCH"
-sudo git pull --ff-only origin "$CURRENT_BRANCH"
+# .git-only copy leaves an empty worktree — materialize files from origin
+sudo git checkout -f "$CURRENT_BRANCH"
+sudo git reset --hard "origin/${CURRENT_BRANCH}"
 SHA=$(sudo git rev-parse --short HEAD)
 sudo git remote set-url origin "https://github.com/${REPO_SLUG}.git"
 
