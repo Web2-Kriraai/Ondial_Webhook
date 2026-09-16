@@ -101,7 +101,7 @@ sudo git remote set-url origin "https://github.com/${REPO_SLUG}.git"
 
 sudo cp "$TARGET_DIR/.env" "$BUILD_DIR/.env"
 sudo chmod 600 "$BUILD_DIR/.env"
-sudo chown "$PM2_USER":"$PM2_USER" "$BUILD_DIR/.env" || true
+sudo chown -R "$PM2_USER":"$PM2_USER" "$BUILD_DIR"
 
 if [ -f "$BUILD_DIR/package-lock.json" ]; then
   sudo -u "$PM2_USER" -H bash -lc "cd '$BUILD_DIR' && npm ci"
