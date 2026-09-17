@@ -16,7 +16,7 @@ const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameter
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
-const { isDirectPhoneContactId } = require("./lib/directContactId");
+const { isDirectPhoneContactId, classifyContactIdForCrs } = require("./lib/directContactId");
 const { tryDeductCampaignCallCredits } = require("./lib/campaignCreditDeduction");
 const { finalizeOutboundCallLog } = require("./lib/finalizeOutboundCallLog");
 const { syncTestCallMirror } = require("./lib/syncTestCallMirror");
@@ -891,6 +891,7 @@ async function didCallReachAnsweredStage({ leadId, callId, collectionName, toPho
 /**
  * India/pool: conversation turns mean the call is live — promote CRS=2.
  * Does not trigger Analysis API (CS1 owns India analysis).
+ * direct_<hex> session ids: fall back to toPhone → updateByMobile (same as hangup updateStatus).
  */
 async function promotePoolConversationAnswered({
     contactId,
@@ -917,10 +918,39 @@ async function promotePoolConversationAnswered({
         });
     }
 
-    const updateResult = await updateByContactId(cid, 2, "pool_conversation");
+    let updateResult = await updateByContactId(cid, 2, "pool_conversation");
+    const classified = classifyContactIdForCrs(cid);
+    if (
+        !updateResult?.applied &&
+        !updateResult?.blocked &&
+        classified.requiresPhoneFallback &&
+        toPhone
+    ) {
+        updateResult = await updateByMobile(
+            toPhone,
+            2,
+            "pool_conversation [direct_session_phone_fallback]"
+        );
+    }
+
     const emittedStatus = Number.isFinite(updateResult?.effectiveStatus)
         ? updateResult.effectiveStatus
-        : 2;
+        : updateResult?.applied
+          ? 2
+          : null;
+
+    if (
+        !updateResult?.applied &&
+        !updateResult?.blocked &&
+        classified.requiresPhoneFallback &&
+        !toPhone
+    ) {
+        logger.error(
+            "[Webhook] hard miss — pool CRS=2 for direct_session without toPhone (nowhere to write CRS)",
+            { contact_id: cid, call_id: key, campaign_id: campaignId || null }
+        );
+    }
+
     emitCallUpdateSse({
         campaign_id: campaignId || null,
         call_id: key,
