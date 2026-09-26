@@ -475,6 +475,9 @@ app.get("/api/v1/sse/listen", (req, res) => {
 
 // ─── Outbound call_unique_id mapping (worker → Redis) ─────────────────────────
 app.post("/api/outbound-call-mapping", async (req, res) => {
+    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_outbound_mapping" });
+    // }
     res.status(200).json({ received: true });
 
     const body = req.body || {};
@@ -809,72 +812,78 @@ app.post("/twilio/call-status", async (req, res) => {
         });
     }
 
-    const contactForSync = resolveTwilioContactId({ twilioMapping, body });
-    const contactSyncResult = contactForSync
-        ? await syncTwilioContactFromCall({
-              contactIdRaw: contactForSync,
-              twilioStatus: status,
-              callSid: normalizedCallSid,
-              source: "twilio_call_status",
-          })
-        : { outcome: "skip_no_contact_id" };
+    // ACK immediately — heavy billing/sync runs after response (same pattern as Telnyx path).
+    res.status(200).json({ received: true, updated: true });
 
-    let creditResult = null;
-    const statusCampaignId = pickNonEmpty(
-        twilioMapping?.campaign_id,
-        body?.campaign_id
-    );
-    // Conversation webhook usually carries campaign_id; avoid noisy no_campaign_id on status-only.
-    if (
-        status.toLowerCase() === "completed" &&
-        duration != null &&
-        duration > 0 &&
-        statusCampaignId
-    ) {
-        creditResult = await maybeDeductTwilioCallCredits({
-            callSid: normalizedCallSid,
-            durationSec: duration,
-            twilioMapping,
-            body,
-            collectionName: primaryCollection,
-        });
-    } else if (status.toLowerCase() === "completed" && duration > 0 && !statusCampaignId) {
-        creditResult = { outcome: "defer_until_conversation" };
-    }
+    setImmediate(async () => {
+        try {
+            const contactForSync = resolveTwilioContactId({ twilioMapping, body });
+            const contactSyncResult = contactForSync
+                ? await syncTwilioContactFromCall({
+                      contactIdRaw: contactForSync,
+                      twilioStatus: status,
+                      callSid: normalizedCallSid,
+                      source: "twilio_call_status",
+                  })
+                : { outcome: "skip_no_contact_id" };
 
-    const statusContactId = pickNonEmpty(
-        contactForSync,
-        twilioMapping?.contact_id,
-        body?.contact_id
-    );
-    const mappedReceiveStatus = mapTwilioCallStatusToReceiveStatus(status);
+            let creditResult = null;
+            const statusCampaignId = pickNonEmpty(
+                twilioMapping?.campaign_id,
+                body?.campaign_id
+            );
+            // Conversation webhook usually carries campaign_id; avoid noisy no_campaign_id on status-only.
+            if (
+                status.toLowerCase() === "completed" &&
+                duration != null &&
+                duration > 0 &&
+                statusCampaignId
+            ) {
+                creditResult = await maybeDeductTwilioCallCredits({
+                    callSid: normalizedCallSid,
+                    durationSec: duration,
+                    twilioMapping,
+                    body,
+                    collectionName: primaryCollection,
+                });
+            } else if (status.toLowerCase() === "completed" && duration > 0 && !statusCampaignId) {
+                creditResult = { outcome: "defer_until_conversation" };
+            }
 
-    emitCallUpdateSse({
-        campaign_id: statusCampaignId || null,
-        call_id: mappedCallId || normalizedCallSid,
-        contact_id: statusContactId || null,
-        status: mappedReceiveStatus,
-        twilio_status: status,
-        event: `twilio_${status.toLowerCase()}`,
-        provider: "twilio",
-    });
+            const statusContactId = pickNonEmpty(
+                contactForSync,
+                twilioMapping?.contact_id,
+                body?.contact_id
+            );
+            const mappedReceiveStatus = mapTwilioCallStatusToReceiveStatus(status);
 
-    logTwilioEventData("[Twilio] Call status updated", {
-        CallSid: normalizedCallSid,
-        CallStatus: status,
-        CallDuration: duration,
-        Timestamp: timestampValue.toISOString(),
-        twilioSetFields,
-        call_data_event: eventDoc,
-        credit: creditResult,
-        contactSync: contactSyncResult,
-    });
+            emitCallUpdateSse({
+                campaign_id: statusCampaignId || null,
+                call_id: mappedCallId || normalizedCallSid,
+                contact_id: statusContactId || null,
+                status: mappedReceiveStatus,
+                twilio_status: status,
+                event: `twilio_${status.toLowerCase()}`,
+                provider: "twilio",
+            });
 
-    return res.status(200).json({
-        received: true,
-        updated: true,
-        credit: creditResult,
-        contactSync: contactSyncResult,
+            logTwilioEventData("[Twilio] Call status updated", {
+                CallSid: normalizedCallSid,
+                CallStatus: status,
+                CallDuration: duration,
+                Timestamp: timestampValue.toISOString(),
+                twilioSetFields,
+                call_data_event: eventDoc,
+                credit: creditResult,
+                contactSync: contactSyncResult,
+            });
+        } catch (err) {
+            logger.error("[Twilio] Async call-status processing failed", {
+                error: err.message,
+                CallSid: normalizedCallSid,
+                CallStatus: status,
+            });
+        }
     });
 });
 
@@ -882,6 +891,9 @@ app.post("/twilio/call-status", async (req, res) => {
 // Receives: { call_control_id | telnyx_call_control_id | callControlId, call_id?, lead_id?, campaign_id, contact_id }
 // Called by the dial worker right after Telnyx returns call_control_id — same contract as /api/twilio-mapping.
 app.post("/api/telnyx-mapping", async (req, res) => {
+    // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_telnyx_mapping_ingress" });
+    // }
     // Ack fast (Twilio mapping parity) — work continues after response.
     res.status(200).json({ received: true });
 
@@ -1615,6 +1627,9 @@ app.post("/hangup", handleCommonHangup);
 
 // ─── Telnyx Conversation Store Endpoint ───────────────────────────────────────
 async function handleTelnyxConversation(req, res) {
+    // if (!verifyIngressAuth(req)) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_conversation" });
+    // }
     const enriched = await enrichBodyWithCarrierIds(req.body || {});
     if (enriched.error === "call_id_not_mapped") {
         logger.warn("[Telnyx] Conversation call_id not mapped", {
@@ -1894,6 +1909,9 @@ async function handleTelnyxConversation(req, res) {
 // ─── Twilio Conversation Store Endpoint ───────────────────────────────────────
 // Receives: { CallSid?, call_id?, turns?|conversation?|messages?|transcript?, campaign_id?, contact_id? }
 async function handleTwilioConversation(req, res) {
+    // if (!verifyIngressAuth(req)) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_conversation" });
+    // }
     const rawIn = req.body || {};
     const maybeTelnyxId =
         rawIn.call_control_id ||
@@ -2205,6 +2223,9 @@ async function handleTwilioConversation(req, res) {
  * Body: { call_id | call_unique_id, turns|conversation|..., campaign_id?, contact_id? }
  */
 async function handlePoolConversation(req, res) {
+    // if (!verifyIngressAuth(req)) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_conversation" });
+    // }
     const body = req.body || {};
     logIngressEvent(req, "[Pool] Conversation webhook payload", body);
     const callKey = normalizeCallId(
@@ -2509,6 +2530,9 @@ async function handlePoolConversation(req, res) {
  * Foreign: { provider?: twilio|telnyx, CallSid? | call_control_id?, turns|... }
  */
 async function handleCommonConversation(req, res) {
+    // if (!verifyIngressAuth(req)) {
+    //     return res.status(401).json({ received: false, error: "unauthorized_conversation" });
+    // }
     const rawBody = req.body || {};
     logProviderApiHit(req, {
         provider: String(rawBody.provider || rawBody.telephony_provider || "unknown")
@@ -2597,6 +2621,9 @@ app.post("/conversation", handleCommonConversation);
 // ─── FLOW 3: Telephony Webhook Endpoint ──────────────────────────────────────
 // Receives all webhook events from telephony provider.
 app.post("/api/v1/webhooks/receiver", async (req, res) => {
+    // if (!verifyIngressAuth(req)) {
+    //     return res.status(401).json({ received: false, error: "unauthorized" });
+    // }
     console.log(`\n--- Incoming Webhook Request from ${req.ip} ---`);
     console.log("--- [WEBHOOK AUTHORIZED] Processing... ---\n");
     const body = req.body;
@@ -2909,4 +2936,19 @@ function setupShutdownHandlers() {
     };
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
+
+    process.on("unhandledRejection", (reason, promise) => {
+        logger.error("[Process] Unhandled promise rejection", {
+            reason: reason instanceof Error ? reason.message : String(reason),
+            stack: reason instanceof Error ? reason.stack : undefined,
+        });
+    });
+
+    process.on("uncaughtException", (err) => {
+        logger.error("[Process] Uncaught exception", {
+            error: err.message,
+            stack: err.stack,
+        });
+        // Do not exit — let the process keep serving; PM2 / container will restart if needed.
+    });
 }

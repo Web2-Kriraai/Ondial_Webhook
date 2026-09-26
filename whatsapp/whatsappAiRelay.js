@@ -528,6 +528,17 @@ async function relayInboundWhatsAppMessage(db, {
     });
   }
 
+  // Stop AI relay for campaigns that are no longer live.
+  const DEAD_CAMPAIGN_STATUSES = ["archived", "cancelled", "completed", "deleted"];
+  if (campaign && DEAD_CAMPAIGN_STATUSES.includes(String(campaign.status || "").toLowerCase())) {
+    logger.info("[WhatsApp] inbound skipped — campaign not live", {
+      phone: phoneNorm,
+      campaignId: campaign._id ? String(campaign._id) : null,
+      campaignStatus: campaign.status,
+    });
+    return { handled: false, reason: "campaign_not_live", campaignStatus: campaign.status };
+  }
+
   let user = null;
   if (campaign?.createdBy) {
     const createdBy = String(campaign.createdBy);

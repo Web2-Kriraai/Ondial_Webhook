@@ -47,6 +47,14 @@ const {
     callLogShowsAnsweredEvidence,
 } = require("./lib/callAnsweredEvidence");
 
+/** Mask all but first 3 and last 2 digits of a phone number for log safety. */
+function redactPhone(phone) {
+    if (!phone) return null;
+    const s = String(phone).trim();
+    if (s.length <= 6) return s.replace(/./g, "*");
+    return s.slice(0, 3) + "*".repeat(s.length - 5) + s.slice(-2);
+}
+
 /**
  * callReceiveStatus values:
  *   0 = call failed (technical error)
@@ -1085,7 +1093,7 @@ async function handleEventWebhook(body) {
         contact_id: contact_id || null,
         campaign_id: identity.campaign_id || null,
         lead_id: lead_id || null,
-        to: to || null,
+        to: redactPhone(to),
         duration: duration ?? null,
         callStatus: body?.callStatus || null,
         answered: body?.answered ?? null,
@@ -1409,7 +1417,7 @@ async function handleSummaryWebhook(body) {
         contact_id: contact_id || null,
         campaign_id: identity.campaign_id || null,
         lead_id: lead_id || null,
-        to: To_number || null,
+        to: redactPhone(To_number),
         source: mapping ? "redis+payload" : "payload-only",
         isInbound: isInboundLog,
     });
@@ -1615,7 +1623,6 @@ function normalizeWebhookPayload(body) {
         provider_call_id: providerCallId,
         call_unique_id: callUniqueId,
         direction: c.direction || null,
-        customParameters: cp.raw,
         extracted: {
             contact_id: cp.contact_id,
             campaign_id: cp.campaign_id,
@@ -1692,7 +1699,9 @@ async function handleWebhook(body, meta = {}) {
             shape: payloadShape,
             providerShape: wasNewShape ? "new" : "legacy",
             normalizedEvent: normalized.event || null,
-            body,
+            keys: Object.keys(body || {}),
+            call_id: normalized.call_id || normalized.Call_UniqueId || null,
+            event: normalized.event || null,
         });
 
         if (normalized.event) {

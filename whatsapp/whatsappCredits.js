@@ -86,7 +86,19 @@ async function deductWhatsappCredits(db, {
     }
   }
 
-  const billingKey = `wa:${kind}:${campaignId || "none"}:${contactId || phone || "unknown"}:${messageId || Date.now()}`;
+  const billingKey = messageId
+    ? `wa:${kind}:${campaignId || "none"}:${contactId || phone || "unknown"}:${messageId}`
+    : null;
+
+  if (!billingKey) {
+    logger.warn("[WhatsApp] Refusing credit deduction without stable messageId", {
+      kind,
+      campaignId: campaignId || null,
+      contactId: contactId || null,
+    });
+    return { ok: false, error: "missing_message_id", amount: 0 };
+  }
+
   const existing = await db.collection("credittransactions").findOne({
     type: kind === "session" ? "whatsapp_session_deduction" : "whatsapp_template_deduction",
     "reference.billingKey": billingKey,
@@ -111,25 +123,45 @@ async function deductWhatsappCredits(db, {
   const type =
     kind === "session" ? "whatsapp_session_deduction" : "whatsapp_template_deduction";
 
-  await db.collection("credittransactions").insertOne({
-    userId,
-    userEmail: user.email || updatedUser.email || "",
-    type,
-    amount: -amount,
-    balanceAfter,
-    description: kind === "session" ? "WhatsApp AI session reply" : "WhatsApp template follow-up",
-    reference: {
-      billingKey,
-      campaignId: campaignId ? String(campaignId) : null,
-      contactId: contactId ? String(contactId) : null,
-      messageId: messageId || null,
-      phone: phone || null,
-      senderMode: senderMode === "own" ? "own" : "platform",
-      sessionWindowMs: kind === "session" ? SESSION_BILLING_WINDOW_MS : undefined,
-    },
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
+  try {
+    await db.collection("credittransactions").insertOne({
+      userId,
+      userEmail: user.email || updatedUser.email || "",
+      type,
+      amount: -amount,
+      balanceAfter,
+      description: kind === "session" ? "WhatsApp AI session reply" : "WhatsApp template follow-up",
+      reference: {
+        billingKey,
+        campaignId: campaignId ? String(campaignId) : null,
+        contactId: contactId ? String(contactId) : null,
+        messageId: messageId || null,
+        phone: phone || null,
+        senderMode: senderMode === "own" ? "own" : "platform",
+        sessionWindowMs: kind === "session" ? SESSION_BILLING_WINDOW_MS : undefined,
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  } catch (insertErr) {
+    if (insertErr?.code === 11000 || String(insertErr?.message || "").includes("E11000")) {
+      try {
+        await db.collection("users").updateOne(
+          { _id: userId },
+          { $inc: { credits: amount }, $set: { updatedAt: new Date() } }
+        );
+      } catch (refundErr) {
+        const logger = require("../logger");
+        logger.error("[WhatsApp] CRITICAL — failed to refund credits after E11000", {
+          billingKey,
+          amount,
+          error: refundErr?.message,
+        });
+      }
+      return { ok: true, skipped: true, amount: 0, duplicate: true };
+    }
+    throw insertErr;
+  }
 
   return { ok: true, amount, balanceAfter };
 }
