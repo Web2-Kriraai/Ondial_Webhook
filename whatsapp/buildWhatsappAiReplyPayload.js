@@ -360,20 +360,16 @@ function languageCode(value) {
   return raw.split(/[-_]/)[0].toLowerCase() || "en";
 }
 
+/**
+ * WhatsApp AI reply schema only accepts `callback_scheduling.status`.
+ * `min_days` / `max_days` cause HTTP 422 ("Extra inputs are not permitted").
+ */
 function toCallbackSchedulingPayload(campaign = {}, { followup, channels, extraStatus = false } = {}) {
   const block = campaign.callbackScheduling || campaign.callback_scheduling || {};
-  let minDays = Math.floor(Number(block.minDays ?? block.min_days ?? 2));
-  let maxDays = Math.floor(Number(block.maxDays ?? block.max_days ?? 5));
-  if (!Number.isFinite(minDays) || minDays < 0) minDays = 2;
-  if (!Number.isFinite(maxDays) || maxDays < 1) maxDays = 5;
-  if (minDays > maxDays) maxDays = minDays;
   const status =
     extraStatus ||
     (block.status !== false && followup === true && Array.isArray(channels) && channels.includes("call"));
-  return {
-    status: Boolean(status),
-    ...(status ? { min_days: minDays, max_days: maxDays } : {}),
-  };
+  return { status: Boolean(status) };
 }
 
 function buildWhatsappAiReplyPayload({
