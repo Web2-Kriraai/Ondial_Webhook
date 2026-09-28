@@ -167,6 +167,7 @@ async function sendWhatsappSessionFollowup(db, { user, campaign, contact, analys
     phone: phoneResult.phone,
     text: body,
     campaignId: campaign?._id,
+    campaignName: campaign?.campaignName || campaign?.name,
     contactId: contact?._id,
     conversationWindowOpensUntil: contact?.conversationWindowOpensUntil || null,
   });
@@ -400,9 +401,11 @@ async function sendWhatsappFollowup(db, { user, campaign, contact, analysis = nu
     kind: "template",
     senderMode: usesPlatform ? "platform" : "own",
     campaignId: campaign._id,
+    campaignName: campaign.campaignName || campaign.name,
     contactId: contact._id,
     messageId,
     phone: phoneResult.phone,
+    templateName,
   });
   if (!deduct.ok && !deduct.skipped) {
     return { success: false, error: deduct.error || "credit_deduction_failed" };

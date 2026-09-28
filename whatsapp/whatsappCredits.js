@@ -8,6 +8,11 @@ const DEFAULT_PRICING = {
 
 const SESSION_BILLING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+function cleanLabel(value) {
+  const s = String(value ?? "").trim();
+  return s || null;
+}
+
 async function loadWhatsappPricing(db) {
   const doc = await db.collection("systemsettings").findOne({ key: "whatsapp_pricing" });
   const value = doc?.value && typeof doc.value === "object" ? doc.value : {};
@@ -57,22 +62,36 @@ async function hasBilledWhatsappSessionInWindow(db, { user, contactId, phone } =
     type: "whatsapp_session_deduction",
     createdAt: { $gte: new Date(Date.now() - SESSION_BILLING_WINDOW_MS) },
   };
-  if (contactKey) query["reference.contactId"] = contactKey;
-  else query["reference.phone"] = phoneKey;
+  if (contactKey) {
+    query["reference.contactId"] = contactKey;
+  } else {
+    query.$or = [
+      { "reference.phone": phoneKey },
+      { "reference.contactPhone": phoneKey },
+      { "reference.phone": phone },
+      { "reference.contactPhone": phone },
+    ];
+  }
 
   const existing = await db.collection("credittransactions").findOne(query);
   return Boolean(existing);
 }
 
+/**
+ * Deduct WhatsApp credits after a successful send.
+ * Writes Ondial dashboard-compatible reference fields (contactPhone, campaignName, …).
+ */
 async function deductWhatsappCredits(db, {
   user,
   cost,
   kind,
   senderMode,
   campaignId,
+  campaignName,
   contactId,
   messageId,
   phone,
+  templateName,
 }) {
   const amount = Number(cost);
   if (!user?._id || !Number.isFinite(amount) || amount <= 0) {
@@ -86,11 +105,17 @@ async function deductWhatsappCredits(db, {
     }
   }
 
-  const billingKey = messageId
-    ? `wa:${kind}:${campaignId || "none"}:${contactId || phone || "unknown"}:${messageId}`
+  const phoneKey = cleanLabel(phone);
+  const campaignLabel = cleanLabel(campaignName);
+  const templateLabel = cleanLabel(templateName);
+  const mid = cleanLabel(messageId);
+
+  const billingKey = mid
+    ? `wa:${kind}:${campaignId || "none"}:${contactId || phoneKey || "unknown"}:${mid}`
     : null;
 
   if (!billingKey) {
+    const logger = require("../logger");
     logger.warn("[WhatsApp] Refusing credit deduction without stable messageId", {
       kind,
       campaignId: campaignId || null,
@@ -123,6 +148,13 @@ async function deductWhatsappCredits(db, {
   const type =
     kind === "session" ? "whatsapp_session_deduction" : "whatsapp_template_deduction";
 
+  const description =
+    kind === "session"
+      ? `WhatsApp AI session reply${campaignLabel ? ` — ${campaignLabel}` : ""}`
+      : `WhatsApp template follow-up${templateLabel ? `: ${templateLabel}` : ""}${
+          campaignLabel ? ` — ${campaignLabel}` : ""
+        }`;
+
   try {
     await db.collection("credittransactions").insertOne({
       userId,
@@ -130,15 +162,21 @@ async function deductWhatsappCredits(db, {
       type,
       amount: -amount,
       balanceAfter,
-      description: kind === "session" ? "WhatsApp AI session reply" : "WhatsApp template follow-up",
+      description,
       reference: {
         billingKey,
         campaignId: campaignId ? String(campaignId) : null,
+        campaignName: campaignLabel,
         contactId: contactId ? String(contactId) : null,
-        messageId: messageId || null,
-        phone: phone || null,
+        messageId: mid,
+        whatsappMessageId: mid,
+        phone: phoneKey,
+        contactPhone: phoneKey,
+        templateName: templateLabel,
+        whatsappKind: kind,
         senderMode: senderMode === "own" ? "own" : "platform",
         sessionWindowMs: kind === "session" ? SESSION_BILLING_WINDOW_MS : undefined,
+        creditsCharged: amount,
       },
       createdAt: new Date(),
       updatedAt: new Date(),

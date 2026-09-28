@@ -18,6 +18,7 @@ async function sendWhatsappSessionReply(db, {
   phone,
   text,
   campaignId,
+  campaignName,
   contactId,
   conversationWindowOpensUntil = null,
 }) {
@@ -64,6 +65,7 @@ async function sendWhatsappSessionReply(db, {
       kind: "session",
       senderMode: usesPlatform ? "platform" : "own",
       campaignId,
+      campaignName,
       contactId,
       messageId,
       phone,

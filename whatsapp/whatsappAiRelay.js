@@ -702,6 +702,7 @@ async function relayInboundWhatsAppMessage(db, {
     phone: phoneNorm,
     text: replyText,
     campaignId: campaign?._id,
+    campaignName: campaign?.campaignName || campaign?.name,
     contactId: contact?._id,
     conversationWindowOpensUntil: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000),
   });
