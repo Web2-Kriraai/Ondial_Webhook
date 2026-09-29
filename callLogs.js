@@ -331,7 +331,7 @@ async function markInboundConversationCompleted(mongoFilter) {
  * Outbound / test: keyed by lead_id.
  * Inbound (InboundConversation): keyed by call_id only — no lead_id stored.
  */
-async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collectionName: explicitCollection }) {
+async function createCallLog({ lead_id, call_id, campaign_id, contact_id, userId, collectionName: explicitCollection }) {
     try {
         const db = getDb();
         const collectionName = explicitCollection || resolveCollection({ contact_id });
@@ -346,12 +346,20 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
             const existing = await db.collection(collectionName).findOne({ call_id: key });
             if (existing) {
                 const needsInit = !existing.call_data || !Array.isArray(existing.call_data?.events);
-                if (needsInit) {
+                const ownerPatch = {};
+                if (userId && !existing.userId) ownerPatch.userId = String(userId);
+                if (campaign_id && !existing.config_id) ownerPatch.config_id = String(campaign_id);
+                if (needsInit || Object.keys(ownerPatch).length) {
                     await db.collection(collectionName).updateOne(
                         { call_id: key },
-                        { $set: { "call_data.events": [] } }
+                        {
+                            $set: {
+                                ...(needsInit ? { "call_data.events": [] } : {}),
+                                ...ownerPatch,
+                            },
+                        }
                     );
-                    logger.info(`[CallLog] Initialized call_data.events inbound call_id=${key}`);
+                    logger.info(`[CallLog] Initialized/patched inbound call_id=${key}`);
                 } else {
                     logger.info(`[CallLog] Inbound doc exists call_id=${key}`);
                 }
@@ -366,6 +374,9 @@ async function createCallLog({ lead_id, call_id, campaign_id, contact_id, collec
                             call_id: { $ifNull: ["$call_id", key] },
                             contact_id: { $ifNull: ["$contact_id", String(contact_id || "")] },
                             config_id: { $ifNull: ["$config_id", String(campaign_id || "")] },
+                            ...(userId
+                                ? { userId: { $ifNull: ["$userId", String(userId)] } }
+                                : {}),
                             call_direction: { $ifNull: ["$call_direction", "inbound"] },
                             createdAt: { $ifNull: ["$createdAt", new Date().toISOString()] },
                             recordingUrl: { $ifNull: ["$recordingUrl", ""] },

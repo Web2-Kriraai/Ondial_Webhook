@@ -538,6 +538,7 @@ async function processInboundHangupBilling({
             toPhone,
             fromPhone,
             campaignId: campaignIdForCredit,
+            inboundConfigId: inboundConfigIdForCredit,
             userId: billing.userId,
         });
         lookupFilter = anchor?.syncFilter || anchor?.filter || lookupFilter;
@@ -598,6 +599,8 @@ async function processInboundHangupBilling({
             providerCallId: billingCallId,
             durationSec,
             recordingUrl,
+            userId: pickNonEmpty(billing.userId, anchor?.userId),
+            configId: inboundConfigIdForCredit,
             creditFields: {
                 creditsDeducted: true,
                 creditDeductionError: null,
@@ -615,6 +618,8 @@ async function processInboundHangupBilling({
             providerCallId: billingCallId,
             durationSec,
             recordingUrl,
+            userId: pickNonEmpty(billing.userId, anchor?.userId),
+            configId: inboundConfigIdForCredit,
             creditFields: {
                 creditsDeducted: false,
                 creditDeductionError: creditResult.error || creditResult.outcome,
