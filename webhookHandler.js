@@ -35,7 +35,7 @@ const logger = require("./logger");
 const { emitCallUpdateSse } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { isInboundWebhook } = require("./lib/inboundCall");
-const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync } = require("./lib/inboundDocAnchor");
+const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync, isLikelyValidateUiDoc } = require("./lib/inboundDocAnchor");
 const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
@@ -1130,12 +1130,29 @@ async function handleEventWebhook(body) {
             }
             const eventRecordingUrl =
                 event === "call_hangup" ? extractRecordingFromBody(body) : null;
-            await appendCallEvent(docKey, event, body, eventRecordingUrl, {
-                contact_id,
-                collectionName,
-                callId: docKey,
-                ...inboundAppendOptions(inboundAnchor, identity, contact_id, inboundCtx),
-            });
+            const earlyInboundEvent =
+                event === "call_initiated" ||
+                event === "call_ringing" ||
+                event === "call_answered";
+            const hasValidateDoc = isLikelyValidateUiDoc(inboundAnchor?.doc);
+            // Proper fix: do not create UUID/call_sid stubs before Ondial validate exists.
+            // Early telephony events are skipped until the validate UI row is available.
+            if (earlyInboundEvent && !hasValidateDoc) {
+                logger.info(
+                    `[CallLog] Skip inbound ${event} persist — waiting for validate doc`,
+                    {
+                        call_id: docKey,
+                        call_sid: inboundAnchor?.callSid || null,
+                    }
+                );
+            } else {
+                await appendCallEvent(docKey, event, body, eventRecordingUrl, {
+                    contact_id,
+                    collectionName,
+                    callId: docKey,
+                    ...inboundAppendOptions(inboundAnchor, identity, contact_id, inboundCtx),
+                });
+            }
         } else {
             logger.warn("[Webhook] Inbound log: missing call_id on event payload", { event });
         }

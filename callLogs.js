@@ -495,6 +495,7 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
     let docFilter;
     let logLabel;
     let inboundCid = null;
+    let inboundAllowUpsert = true;
 
     if (inbound) {
         inboundCid = normalizeCallId(
@@ -506,6 +507,24 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
         }
         docFilter = options.inboundDocFilter || { call_id: inboundCid };
         logLabel = JSON.stringify(docFilter);
+
+        // Hard stop: never create a new inbound stub for early telephony events.
+        // If the filter does not match an existing doc, skip instead of upsert-insert.
+        const earlyInboundEvent =
+            event_type === "call_initiated" ||
+            event_type === "call_ringing" ||
+            event_type === "call_answered";
+        if (earlyInboundEvent) {
+            const db = getDb();
+            const existing = await db.collection(resolvedCollectionName).findOne(docFilter);
+            if (!existing) {
+                logger.info(
+                    `[CallLog] Skip inbound ${event_type} upsert — no existing doc for ${logLabel}`
+                );
+                return;
+            }
+            inboundAllowUpsert = false;
+        }
     } else {
         const effectiveLeadId = resolveOutboundLeadId(lead_id, options);
         if (!effectiveLeadId) return;
@@ -616,12 +635,18 @@ async function appendCallEvent(lead_id, event_type, eventData, recordingUrl = nu
         }
 
         const coll = db.collection(resolvedCollectionName);
-        const result = await updateOneWithUpsertRaceRetry(coll, docFilter, pipeline);
+        const result = inboundAllowUpsert
+            ? await updateOneWithUpsertRaceRetry(coll, docFilter, pipeline)
+            : await coll.updateOne(docFilter, pipeline, { upsert: false });
 
         if (result.upsertedCount > 0) {
             logger.info(`[CallLog] Created doc and stored event '${event_type}' for ${logLabel}`);
         } else if (result.modifiedCount > 0) {
             logger.info(`[CallLog] Appended event '${event_type}' to ${logLabel}`);
+        } else if (!inboundAllowUpsert && result.matchedCount === 0) {
+            logger.info(
+                `[CallLog] Skip inbound ${event_type} — target doc missing for ${logLabel}`
+            );
         } else {
             logger.warn(
                 `[CallLog] appendCallEvent matched but did not modify (${logLabel}, event=${event_type})`
