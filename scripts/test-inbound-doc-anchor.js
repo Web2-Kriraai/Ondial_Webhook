@@ -9,6 +9,7 @@ const {
     callSidLookupVariants,
     inboundDocFilterFor,
     isLikelyValidateUiDoc,
+    isWebhookStubDoc,
     pickBestInboundDoc,
 } = require("../lib/inboundDocAnchor");
 
@@ -37,6 +38,7 @@ function run() {
         call_sid: CALL_SID,
     };
     assert.deepStrictEqual(inboundDocFilterFor(stub), { call_sid: CALL_SID });
+    assert.strictEqual(isWebhookStubDoc(stub), true);
 
     const validate = {
         call_id: "6a23e04eda8ac5b859f845d6",
@@ -47,6 +49,7 @@ function run() {
     assert.deepStrictEqual(inboundDocFilterFor(validate), { call_id: "6a23e04eda8ac5b859f845d6" });
     assert.strictEqual(isLikelyValidateUiDoc(validate), true);
     assert.strictEqual(isLikelyValidateUiDoc(stub), false);
+    assert.strictEqual(isWebhookStubDoc(validate), false);
 
     const picked = pickBestInboundDoc([stub, validate]);
     assert.strictEqual(picked.call_id, validate.call_id);
