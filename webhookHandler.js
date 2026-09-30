@@ -651,6 +651,31 @@ async function finalizeInboundCallEnd(inboundAnchor, creditResult) {
             inboundAnchor.providerCallId || inboundAnchor.doc?.call_id
         );
     }
+
+    // Best-effort inbound analysis after hangup finalize (idempotent; may defer if no turns yet).
+    try {
+        const { triggerInboundCallAnalysis } = require("./lib/triggerInboundCallAnalysis");
+        const analysisKey =
+            inboundAnchor.doc?.call_id ||
+            inboundAnchor.providerCallId ||
+            inboundAnchor.doc?.call_sid ||
+            inboundAnchor.doc?._id;
+        if (analysisKey) {
+            void triggerInboundCallAnalysis(String(analysisKey), {
+                isTestCall: inboundAnchor.doc?.isTestCall === true,
+                deferIfNoTurns: true,
+            }).catch((err) => {
+                logger.warn("[InboundAnalysis] Trigger after hangup finalize failed", {
+                    callId: analysisKey,
+                    error: err?.message || err,
+                });
+            });
+        }
+    } catch (err) {
+        logger.warn("[InboundAnalysis] Module load failed after hangup", {
+            error: err?.message || err,
+        });
+    }
 }
 
 /**

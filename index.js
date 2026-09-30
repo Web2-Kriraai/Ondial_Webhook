@@ -54,6 +54,7 @@ const { processAisensyMarketingWebhookSafe } = require("./lib/aisensyMarketingWe
 const { processAisensyInboundSafe } = require("./whatsapp/processAisensyInbound");
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const { triggerCallAnalysis } = require("./lib/triggerCallAnalysis");
+const { triggerInboundCallAnalysis } = require("./lib/triggerInboundCallAnalysis");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { pickNonEmpty } = require("./lib/customParameters");
 const { maybeDeductTwilioCallCredits } = require("./lib/twilioCallBilling");
@@ -1869,18 +1870,33 @@ async function handleTelnyxConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    triggerCallAnalysis(dialerCallUniqueId || enriched.dialerCallId || sid, {
-        isTestCall:
-            storedDoc?.isTestCall === true ||
-            telnyxMapping?.is_test_call === true ||
-            inferIsTestCallFromWebhookBody(body),
-    }).catch((err) => {
-        logger.warn("[Telnyx] Analysis trigger failed after conversation store", {
-            call_control_id: sid,
-            call_id: dialerCallUniqueId || enriched.dialerCallId || null,
-            error: err.message,
+    const telnyxAnalysisKey = dialerCallUniqueId || enriched.dialerCallId || sid;
+    const telnyxIsTest =
+        storedDoc?.isTestCall === true ||
+        telnyxMapping?.is_test_call === true ||
+        inferIsTestCallFromWebhookBody(body);
+    if (primaryCollection === INBOUND_COLL) {
+        triggerInboundCallAnalysis(telnyxAnalysisKey, {
+            isTestCall: telnyxIsTest,
+            deferIfNoTurns: true,
+        }).catch((err) => {
+            logger.warn("[Telnyx] Inbound analysis trigger failed after conversation store", {
+                call_control_id: sid,
+                call_id: dialerCallUniqueId || enriched.dialerCallId || null,
+                error: err.message,
+            });
         });
-    });
+    } else {
+        triggerCallAnalysis(telnyxAnalysisKey, {
+            isTestCall: telnyxIsTest,
+        }).catch((err) => {
+            logger.warn("[Telnyx] Analysis trigger failed after conversation store", {
+                call_control_id: sid,
+                call_id: dialerCallUniqueId || enriched.dialerCallId || null,
+                error: err.message,
+            });
+        });
+    }
 
     logger.info("[Telnyx] Conversation stored", {
         call_control_id: sid,
@@ -2194,18 +2210,31 @@ async function handleTwilioConversation(req, res) {
         turnCount: normalizedConversation.turns.length,
     });
 
-    // Best-effort analysis trigger for Twilio calls once conversation is available.
-    triggerCallAnalysis(sid, {
-        isTestCall:
-            storedDoc?.isTestCall === true ||
-            twilioMapping?.is_test_call === true ||
-            inferIsTestCallFromWebhookBody(body),
-    }).catch((err) => {
-        logger.warn("[Twilio] Analysis trigger failed after conversation store", {
-            CallSid: sid,
-            error: err.message,
+    // Best-effort analysis trigger once conversation is available.
+    const twilioIsTest =
+        storedDoc?.isTestCall === true ||
+        twilioMapping?.is_test_call === true ||
+        inferIsTestCallFromWebhookBody(body);
+    if (primaryCollection === INBOUNDCALLLOG_COLLECTION) {
+        triggerInboundCallAnalysis(sid, {
+            isTestCall: twilioIsTest,
+            deferIfNoTurns: true,
+        }).catch((err) => {
+            logger.warn("[Twilio] Inbound analysis trigger failed after conversation store", {
+                CallSid: sid,
+                error: err.message,
+            });
         });
-    });
+    } else {
+        triggerCallAnalysis(sid, {
+            isTestCall: twilioIsTest,
+        }).catch((err) => {
+            logger.warn("[Twilio] Analysis trigger failed after conversation store", {
+                CallSid: sid,
+                error: err.message,
+            });
+        });
+    }
 
     return res.status(200).json({
         received: true,
@@ -2480,19 +2509,29 @@ async function handlePoolConversation(req, res) {
         });
     }
 
-    // India/pool analysis is owned by Calling_system1 post-call.
-    // Optional safety net only: WEBHOOK_TRIGGER_INDIA_ANALYSIS=true (uses ANALYSIS_API_URL on this host).
-    // Do NOT enable in prod for India — wrong Analysis host (foreignscript) and duplicate risk.
-    if (
+    // Inbound pool/India legs: webhook owns inbound analysis (CS1 does not).
+    // Outbound India analysis stays CS1-owned unless WEBHOOK_TRIGGER_INDIA_ANALYSIS=true.
+    const poolIsTest =
+        storedDoc?.isTestCall === true ||
+        mapping?.is_test_call === true ||
+        inferIsTestCallFromWebhookBody(body);
+    if (matchedCollection === INBOUNDCALLLOG_COLLECTION) {
+        triggerInboundCallAnalysis(callKey, {
+            isTestCall: poolIsTest,
+            deferIfNoTurns: true,
+        }).catch((err) => {
+            logger.warn("[Pool] Inbound analysis trigger failed after conversation store", {
+                call_id: callKey,
+                error: err.message,
+            });
+        });
+    } else if (
         String(process.env.WEBHOOK_TRIGGER_INDIA_ANALYSIS || "")
             .trim()
             .toLowerCase() === "true"
     ) {
         triggerCallAnalysis(callKey, {
-            isTestCall:
-                storedDoc?.isTestCall === true ||
-                mapping?.is_test_call === true ||
-                inferIsTestCallFromWebhookBody(body),
+            isTestCall: poolIsTest,
         }).catch((err) => {
             logger.warn("[Pool] Analysis trigger failed after conversation store", {
                 call_id: callKey,
