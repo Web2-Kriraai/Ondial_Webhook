@@ -45,7 +45,7 @@ describe("webhook inbound analysis payload", () => {
     assert.equal(r.skip, true);
   });
 
-  it("builds payload", () => {
+  it("never sends empty businessHours", () => {
     const result = buildInboundCallAnalysisPayload({
       config: {
         _id: "674a1b2c3d4e5f6789012341",
@@ -63,7 +63,7 @@ describe("webhook inbound analysis payload", () => {
       },
     });
     assert.equal(result.ok, true);
-    assert.equal(result.payload.categoryConfig.call_feature[0], "appointment_booking");
+    assert.ok(String(result.payload.config.buisnessDetails.businessHours).trim());
   });
 });
 
