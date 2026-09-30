@@ -32,10 +32,16 @@ const {
 const CALLLOGS_COLLECTION = process.env.CALLLOGS_COLLECTION || "CallLogs";
 const { logMissingCallMapping, previewPayload } = require("./errorLog");
 const logger = require("./logger");
-const { emitCallUpdateSse } = require("./events");
+const { emitCallUpdateSse, buildInboundSseEnrichment } = require("./events");
 const { notifyOndialInboundWebhook } = require("./inboundNotify");
 const { isInboundWebhook } = require("./lib/inboundCall");
-const { resolveInboundConversationAnchor, syncInboundCompletionFields, scheduleDeferredInboundCompletionSync, isLikelyValidateUiDoc } = require("./lib/inboundDocAnchor");
+const {
+    resolveInboundConversationAnchor,
+    syncInboundCompletionFields,
+    scheduleDeferredInboundCompletionSync,
+    isLikelyValidateUiDoc,
+} = require("./lib/inboundDocAnchor");
+const { extractConfigIdFromDoc } = require("./lib/mongoObjectId");
 const { phoneVariants } = require("./lib/resolveInboundBillingContext");
 const { resolveInboundBillingContext } = require("./lib/resolveInboundBillingContext");
 const { findOneCallLogByIdentity } = require("./lib/findCallLogsByIdentity");
@@ -716,7 +722,27 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
         collectionName = collectionName || mapping?.collectionName || null;
     }
 
-    const isInboundMapping = collectionName === INBOUNDCALLLOG_COLLECTION;
+    const isInboundMapping =
+        collectionName === INBOUNDCALLLOG_COLLECTION ||
+        String(precomputed?.direction || "").toLowerCase() === "inbound";
+
+    const sseExtra = buildInboundSseEnrichment({
+        isInbound: isInboundMapping,
+        identity: precomputed,
+        toPhone: mobileRaw,
+    });
+
+    const emitSse = (patch = {}) => {
+        emitCallUpdateSse({
+            campaign_id: campaign_id || sseExtra.campaign_id || null,
+            call_id: callId,
+            contact_id: contact_id || null,
+            status: newStatus,
+            event: context || "call_update",
+            ...sseExtra,
+            ...patch,
+        });
+    };
 
     if (contact_id) {
         let updateResult = await updateByContactId(contact_id, newStatus, context);
@@ -738,24 +764,15 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
         const emittedStatus = Number.isFinite(updateResult?.effectiveStatus)
             ? updateResult.effectiveStatus
             : newStatus;
-        emitCallUpdateSse({
-            campaign_id: campaign_id || null,
-            call_id: callId,
+        emitSse({
             contact_id,
             status: emittedStatus,
-            event: context || "call_update",
         });
         return;
     }
 
     if (isInboundMapping) {
-        emitCallUpdateSse({
-            campaign_id: campaign_id || null,
-            call_id: callId,
-            contact_id: null,
-            status: newStatus,
-            event: context || 'call_update',
-        });
+        emitSse({ contact_id: null, status: newStatus });
         return;
     }
 
@@ -765,10 +782,10 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
             `[Webhook] hard miss — UUID call_unique_id=${normCallId} has no contact_id after CallLog enrich (refusing phone fallback)`,
             { context, to: mobileRaw || null, campaign_id: campaign_id || null }
         );
-        emitCallUpdateSse({
-            call_id: callId,
+        emitSse({
+            contact_id: null,
             status: newStatus,
-            event: context || 'call_update',
+            direction: sseExtra.direction || "outbound",
         });
         return;
     }
@@ -777,10 +794,10 @@ async function updateStatus(callId, mobileRaw, newStatus, context = "", precompu
     const updateResult = await updateByMobile(mobileRaw, newStatus, context);
     const emittedStatus = Number.isFinite(updateResult?.effectiveStatus) ? updateResult.effectiveStatus : newStatus;
 
-    emitCallUpdateSse({
-        call_id: callId,
+    emitSse({
+        contact_id: null,
         status: emittedStatus,
-        event: context || 'call_update',
+        direction: "outbound",
     });
 }
 
@@ -1081,15 +1098,32 @@ async function handleEventWebhook(body) {
         identity = enriched.identity;
         inboundAnchor = enriched.anchor;
         contact_id = identity.contact_id;
+        let inboundBilling = null;
         if (to && inboundAnchor) {
-            const billing = await resolveInboundBillingContext({
+            inboundBilling = await resolveInboundBillingContext({
                 anchor: inboundAnchor,
                 toPhone: to,
             });
-            if (billing.campaignId) {
-                identity = { ...identity, campaign_id: billing.campaignId };
+            if (inboundBilling.campaignId) {
+                identity = { ...identity, campaign_id: inboundBilling.campaignId };
             }
         }
+        const configId = pickNonEmpty(
+            inboundBilling?.inboundConfigId,
+            extractConfigIdFromDoc(inboundAnchor?.doc),
+            inboundAnchor?.campaignId
+        );
+        const userId = pickNonEmpty(inboundBilling?.userId, inboundAnchor?.userId);
+        identity = {
+            ...identity,
+            direction: "inbound",
+            userId: userId || null,
+            configId: configId || null,
+            config_id: configId || null,
+            phoneNumber: to || null,
+            _inboundBilling: inboundBilling,
+            _inboundAnchor: inboundAnchor,
+        };
     }
 
     console.log("[Webhook][Event] received", {
@@ -1197,10 +1231,17 @@ async function handleEventWebhook(body) {
 
             // Fire SSE anyway so UI call logs reload the ringing/initiated state
             emitCallUpdateSse({
-                campaign_id: identity.campaign_id || null,
+                campaign_id: isInboundLog ? null : identity.campaign_id || null,
                 call_id,
                 contact_id: contact_id || null,
                 event,
+                ...buildInboundSseEnrichment({
+                    isInbound: isInboundLog,
+                    identity,
+                    anchor: inboundAnchor,
+                    toPhone: to,
+                    billing: identity._inboundBilling || null,
+                }),
             });
             break;
 
@@ -1223,13 +1264,20 @@ async function handleEventWebhook(body) {
                 legs: body?.legs,
             });
             emitCallUpdateSse({
-                campaign_id: identity.campaign_id || null,
+                campaign_id: isInboundLog ? null : identity.campaign_id || null,
                 call_id,
                 contact_id: contact_id || null,
                 status: 2,
                 event: "call_transfer",
                 transferTarget: body?.transferTarget || null,
                 transferAt: body?.transferAt || null,
+                ...buildInboundSseEnrichment({
+                    isInbound: isInboundLog,
+                    identity,
+                    anchor: inboundAnchor,
+                    toPhone: to,
+                    billing: identity._inboundBilling || null,
+                }),
             });
             logger.info(
                 `[Webhook] call_transfer recorded for call_id=${call_id}` +
