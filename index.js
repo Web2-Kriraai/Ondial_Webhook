@@ -210,15 +210,58 @@ function verifyIngressAuth(req, { allowHmac = true, allowBearer = true, secretEn
         return true;
     }
 
+    // Wave 6: also accept CS1 X-API-Key (mapping keys) so enforce can be enabled later.
+    try {
+        const { hasMatchingApiKey } = require("./lib/authMode");
+        if (
+            hasMatchingApiKey(req, [
+                "OUTBOUND_CALL_MAPPING_API_KEY",
+                "TWILIO_MAPPING_API_KEY",
+                "TELNYX_MAPPING_API_KEY",
+            ])
+        ) {
+            console.log(">>> [AUTH SUCCESS] Valid X-API-Key");
+            return true;
+        }
+    } catch {
+        /* ignore */
+    }
+
     console.log(">>> [AUTH FAILED] No valid authentication found");
     logger.warn("[Auth] All ingress authentication methods failed", {
         headers: {
             "x-webhook-secret": req.headers["x-webhook-secret"] ? "present" : "missing",
             "authorization": req.headers["authorization"] ? "present" : "missing",
-            "x-webhook-signature": req.headers["x-webhook-signature"] ? "present" : "missing"
+            "x-webhook-signature": req.headers["x-webhook-signature"] ? "present" : "missing",
+            "x-api-key": req.headers["x-api-key"] ? "present" : "missing",
         }
     });
     return false;
+}
+
+/** Wave 6: AUTH_MODE_* gate (off / log_only / enforce). Never throws. */
+function maybeAuthModeGate(req, res, group, checkOk) {
+    try {
+        const { applyAuthModeGate } = require("./lib/authMode");
+        let ok = false;
+        let reason = "check_failed";
+        try {
+            const result = typeof checkOk === "function" ? checkOk() : Boolean(checkOk);
+            if (result && typeof result === "object") {
+                ok = Boolean(result.ok);
+                reason = result.reason || reason;
+            } else {
+                ok = Boolean(result);
+                reason = ok ? "ok" : "auth_failed";
+            }
+        } catch (err) {
+            ok = false;
+            reason = err?.message || "check_error";
+        }
+        return applyAuthModeGate({ group, ok, reason, req, res });
+    } catch {
+        return false;
+    }
 }
 
 function cloneJsonSafe(value) {
@@ -425,13 +468,40 @@ function buildLegacyConversationShape({ turns, transcript, startTime, endTime })
 
 // ─── FLOW 1: Server-Sent Events (SSE) Endpoint ──────────────────────────────
 app.get("/api/v1/sse/listen", (req, res) => {
+    const campaignId = String(req.query.campaignId || "").trim();
+    try {
+        const { getAuthMode, applyAuthModeGate, verifySseToken } = require("./lib/authMode");
+        const mode = getAuthMode("sse");
+        if (mode !== "off") {
+            const secret =
+                process.env.SSE_TOKEN_SECRET ||
+                process.env.WEBHOOK_SHARED_SECRET ||
+                process.env.WEBHOOK_INTERNAL_SECRET ||
+                "";
+            const token = String(req.query.token || req.headers["x-sse-token"] || "").trim();
+            let ok = false;
+            let reason = "missing_token";
+            if (!campaignId && mode === "enforce") {
+                ok = false;
+                reason = "empty_campaignId";
+            } else if (token && secret) {
+                const v = verifySseToken(token, { secret, campaignId });
+                ok = v.ok;
+                reason = v.reason;
+            } else if (!secret) {
+                reason = "no_sse_secret_configured";
+            }
+            if (applyAuthModeGate({ group: "sse", ok, reason, req, res })) return;
+        }
+    } catch {
+        /* never break SSE when auth helper fails in off/log_only */
+    }
+
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
-
-    const campaignId = String(req.query.campaignId || "").trim();
 
     res.write(`data: ${JSON.stringify({
         type: "sse.connected",
@@ -479,6 +549,13 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
     // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
     //     return res.status(401).json({ received: false, error: "unauthorized_outbound_mapping" });
     // }
+    if (
+        maybeAuthModeGate(req, res, "mapping", () =>
+            verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })
+        )
+    ) {
+        return;
+    }
     res.status(200).json({ received: true });
 
     const body = req.body || {};
@@ -522,6 +599,13 @@ app.post("/api/twilio-mapping", async (req, res) => {
     // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
     //     return res.status(401).json({ received: false, error: "unauthorized_twilio_mapping_ingress" });
     // }
+    if (
+        maybeAuthModeGate(req, res, "mapping", () =>
+            verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })
+        )
+    ) {
+        return;
+    }
 
     res.status(200).json({ received: true });
 
@@ -614,6 +698,54 @@ app.post("/twilio/call-status", async (req, res) => {
     // if (!verifyIngressAuth(req, { allowHmac: false, allowBearer: true, secretEnv: "WEBHOOK_SHARED_SECRET" })) {
     //     return res.status(401).json({ received: false, error: "unauthorized" });
     // }
+    if (
+        maybeAuthModeGate(req, res, "twilio_status", () => {
+            // Prefer Twilio signature when auth token + public URL configured.
+            try {
+                const authToken = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
+                const publicBase = String(
+                    process.env.TWILIO_STATUS_CALLBACK_PUBLIC_URL ||
+                        process.env.PUBLIC_WEBHOOK_BASE_URL ||
+                        ""
+                ).trim();
+                if (authToken && publicBase) {
+                    const twilio = require("twilio");
+                    const proto = String(
+                        req.headers["x-forwarded-proto"] || req.protocol || "https"
+                    )
+                        .split(",")[0]
+                        .trim();
+                    const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+                        .split(",")[0]
+                        .trim();
+                    const url =
+                        publicBase.replace(/\/$/, "") +
+                        "/twilio/call-status";
+                    const signature = req.headers["x-twilio-signature"];
+                    const ok = twilio.validateRequest(
+                        authToken,
+                        signature,
+                        url,
+                        req.body || {}
+                    );
+                    if (ok) return { ok: true, reason: "twilio_signature" };
+                    return { ok: false, reason: "twilio_signature_invalid" };
+                }
+            } catch (err) {
+                return { ok: false, reason: err?.message || "twilio_validate_error" };
+            }
+            return {
+                ok: verifyIngressAuth(req, {
+                    allowHmac: false,
+                    allowBearer: true,
+                    secretEnv: "WEBHOOK_SHARED_SECRET",
+                }),
+                reason: "shared_secret",
+            };
+        })
+    ) {
+        return;
+    }
 
     const body = req.body || {};
 
@@ -895,6 +1027,13 @@ app.post("/api/telnyx-mapping", async (req, res) => {
     // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
     //     return res.status(401).json({ received: false, error: "unauthorized_telnyx_mapping_ingress" });
     // }
+    if (
+        maybeAuthModeGate(req, res, "mapping", () =>
+            verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })
+        )
+    ) {
+        return;
+    }
     // Ack fast (Twilio mapping parity) — work continues after response.
     res.status(200).json({ received: true });
 
@@ -1352,6 +1491,18 @@ async function processTelnyxCallControlWebhook(parsed, body) {
 // Must return 2xx within ~2s; heavy work runs after ack.
 async function handleTelnyxWebhooks(req, res) {
     const body = req.body || {};
+
+    if (
+        maybeAuthModeGate(req, res, "telnyx_webhooks", () => {
+            if (!isTelnyxSignatureRequired()) {
+                return { ok: true, reason: "verify_not_required" };
+            }
+            const sig = verifyTelnyxWebhookSignature(req);
+            return { ok: Boolean(sig.ok), reason: sig.reason || (sig.ok ? "ok" : "invalid_signature") };
+        })
+    ) {
+        return;
+    }
 
     if (isTelnyxSignatureRequired()) {
         const sig = verifyTelnyxWebhookSignature(req);
@@ -2275,6 +2426,10 @@ async function handlePoolConversation(req, res) {
     // if (!verifyIngressAuth(req)) {
     //     return res.status(401).json({ received: false, error: "unauthorized_conversation" });
     // }
+    // Wave 6: log_only only for pool/india conversation (never enforce by default).
+    if (maybeAuthModeGate(req, res, "conversation", () => verifyIngressAuth(req))) {
+        return;
+    }
     const body = req.body || {};
     logIngressEvent(req, "[Pool] Conversation webhook payload", body);
     const callKey = normalizeCallId(
@@ -2721,6 +2876,13 @@ app.post("/api/inbound-mapping", async (req, res) => {
     // if (!verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })) {
     //     return res.status(401).json({ received: false, error: "unauthorized_inbound_mapping" });
     // }
+    if (
+        maybeAuthModeGate(req, res, "inbound_mapping", () =>
+            verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })
+        )
+    ) {
+        return;
+    }
     res.status(200).json({ received: true });
 
     const { call_type, call_id, from_number, campaign_id, contact_id } = req.body;

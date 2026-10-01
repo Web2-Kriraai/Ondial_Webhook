@@ -22,7 +22,11 @@
 | `CREDIT_HOLD_ENABLED` | `0` | twilio/telnyx | Hold credits at dial; settle on hangup | Keep `0` |
 | `CREDIT_HOLD_PROVIDERS` | `twilio,telnyx` | excludes pool | Hold scope | remove provider |
 | `CREDIT_HOLD_TTL_SEC` | `7200` | holds | Orphan release TTL | raise |
-
-Wave 6+ flags (not enabled yet): `AUTH_MODE_*`.
+| `AUTH_MODE_SSE` | `off` | SSE | `off` \| `log_only` \| `enforce` | `off` |
+| `AUTH_MODE_TWILIO_STATUS` | `off` | Twilio status | same | `off` |
+| `AUTH_MODE_MAPPING` | `off` | mapping routes | same | `off` |
+| `AUTH_MODE_CONVERSATION` | `off` | pool/india conversation | same | `off` |
+| `AUTH_MODE_INBOUND_MAPPING` | `off` | inbound mapping | same | `off` |
+| `AUTH_MODE_TELNYX_WEBHOOKS` | `off` | Telnyx webhooks | same | `off` |
 
 **LIVE note:** `PRICING_BASIS` stays `did`. Destination / max_of_both are implemented but OFF. See `docs/RUNBOOK_PRICING_BASIS_FLIP.md`.
