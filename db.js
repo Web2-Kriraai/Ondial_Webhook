@@ -61,6 +61,14 @@ async function ensureIndexes(database) {
     );
     await ensureCreditTransactionBillingKeyIndex(database);
     await ensurePricingShadowLogIndexes(database);
+    try {
+        const { ensureCallEconomicsIndexes } = require("./lib/callEconomics");
+        await ensureCallEconomicsIndexes(database);
+    } catch (econIdxErr) {
+        logger.warn("[DB] call_economics indexes skipped", {
+            error: econIdxErr?.message || String(econIdxErr),
+        });
+    }
 }
 
 /**

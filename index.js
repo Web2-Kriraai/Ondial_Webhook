@@ -1260,6 +1260,26 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         },
     });
 
+    // Wave 2: when call.cost arrives, patch observe-only economics actual cost (no customer charge).
+    if (eventType === "call.cost" && payload?.total_cost != null) {
+        try {
+            const { maybeUpdateActualProviderCost } = require("./lib/callEconomics");
+            const econCallId = mappedCallId || callControlId;
+            const billed =
+                telnyxSetFields["telnyx.billed_duration_secs"] != null
+                    ? telnyxSetFields["telnyx.billed_duration_secs"]
+                    : null;
+            await maybeUpdateActualProviderCost({
+                db,
+                callId: econCallId,
+                actualProviderCostUsd: payload.total_cost,
+                providerBilledSeconds: billed,
+            });
+        } catch {
+            /* ignore — observe only */
+        }
+    }
+
     let contactSyncResult = { outcome: "skip_informational" };
     if (contactId && mappedStatus) {
         contactSyncResult = await syncTelnyxContactFromCall({
