@@ -18,7 +18,11 @@
 | `COMPUTE_COST_ROUND_SIX` | `0` | Ondial `computeCallUsageCost` | Round cost to 6dp instead of 5dp | Keep `0` |
 | `PRICE_FLOOR_ENABLED` | `0` | foreign LIVE | Compare customer charge to estimated provider cost | Keep `0` |
 | `PRICE_FLOOR_ACTION` | `log` | when floor on | `log` only or `bump` charge to estimate | `log` |
+| `BILLING_WALLET_SHADOW` | `1` (on) | all deduct paths | Log parent vs creator wallet choice; no debit change | `0` |
+| `CREDIT_HOLD_ENABLED` | `0` | twilio/telnyx | Hold credits at dial; settle on hangup | Keep `0` |
+| `CREDIT_HOLD_PROVIDERS` | `twilio,telnyx` | excludes pool | Hold scope | remove provider |
+| `CREDIT_HOLD_TTL_SEC` | `7200` | holds | Orphan release TTL | raise |
 
-Wave 5+ flags (not enabled yet): `CREDIT_HOLD_*`, `AUTH_MODE_*`, `BILLING_WALLET_SHADOW`.
+Wave 6+ flags (not enabled yet): `AUTH_MODE_*`.
 
 **LIVE note:** `PRICING_BASIS` stays `did`. Destination / max_of_both are implemented but OFF. See `docs/RUNBOOK_PRICING_BASIS_FLIP.md`.

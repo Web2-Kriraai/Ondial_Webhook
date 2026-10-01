@@ -69,6 +69,14 @@ async function ensureIndexes(database) {
             error: econIdxErr?.message || String(econIdxErr),
         });
     }
+    try {
+        const { ensureCreditHoldIndexes } = require("./lib/creditHold");
+        await ensureCreditHoldIndexes(database);
+    } catch (holdIdxErr) {
+        logger.warn("[DB] credit hold indexes skipped", {
+            error: holdIdxErr?.message || String(holdIdxErr),
+        });
+    }
 }
 
 /**
@@ -382,28 +390,15 @@ async function ensureCreditTransactionBillingKeyIndex(database) {
         logger.info("[DB] Unique index on credittransactions (type, reference.billingKey) ensured");
     } catch (err) {
         const msg = String(err.message || "");
-        if (
-            err.code === 11000 ||
-            /duplicate key/i.test(msg) ||
-            /E11000/i.test(msg)
-        ) {
-            logger.warn(
-                "[DB] Duplicate billingKey values exist; creating non-unique index on credittransactions",
-                { error: msg }
-            );
-            try {
-                await coll.createIndex(
-                    { type: 1, "reference.billingKey": 1 },
-                    { name: "credittx_type_billingKey_nonunique" }
-                );
-            } catch { /* ignore */ }
-            return;
-        }
         if (err.code === 85 || err.code === 86 || /IndexOptionsConflict|already exists/i.test(msg)) {
             logger.info("[DB] credittransactions billingKey index already present", { message: msg });
             return;
         }
-        logger.warn("[DB] credittransactions billingKey index not created", { error: msg });
+        // Wave 5: no non-unique fallback — fail loudly (fatal log). Process continues so ops can fix data.
+        logger.error(
+            "[DB] FATAL — unique billingKey index could not be created; double-charge protection degraded",
+            { error: msg, code: err.code }
+        );
     }
 }
 
