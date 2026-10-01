@@ -1,0 +1,36 @@
+# Proposed countryPricingV1 matrix rows (review only — NOT inserted)
+
+Generated for Wave 1 decision #5. Do **not** insert into production without review.
+
+## Explicitly requested
+
+| ISO | Notes | Suggested seed approach |
+|---|---|---|
+| AE | Prefix `971` already resolves; **not** in DEFAULT_COUNTRY_PRICING seed | Add US-like or region-specific packages in Super-Admin |
+| DO | Prefixes `1809`/`1829`/`1849` (behind `NANP_ISLAND_PREFIXES`) | Add NANP-adjacent rates (often near US); review carrier costs in Phase C |
+
+## Top callee countries from CallLogs
+
+**EXTERNAL / NOT RUN:** requires read-only Mongo access with `MONGODB_URI`.  
+When available, run:
+
+```js
+// scripts/proposed_matrix_rows_from_calllogs.js (to be run manually)
+db.CallLogs.aggregate([
+  { $match: { /* filter twilio/telnyx via campaign join or provider fields */ } },
+  { $group: { _id: "$to_number", n: { $sum: 1 } } },
+  { $sort: { n: -1 } },
+  { $limit: 5000 }
+])
+```
+
+Then map numbers through `countryIsoFromPhone` and rank ISO codes. Output should replace this stub.
+
+```json
+{
+  "generatedAt": "2026-10-01",
+  "status": "stub_awaiting_mongo_read",
+  "requestedRows": ["AE", "DO"],
+  "topCalleeCountriesFromCallLogs": []
+}
+```

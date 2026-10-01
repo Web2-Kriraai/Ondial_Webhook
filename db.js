@@ -60,6 +60,7 @@ async function ensureIndexes(database) {
         process.env.INBOUNDCALLLOG_COLLECTION || "InboundConversation"
     );
     await ensureCreditTransactionBillingKeyIndex(database);
+    await ensurePricingShadowLogIndexes(database);
 }
 
 /**
@@ -395,5 +396,40 @@ async function ensureCreditTransactionBillingKeyIndex(database) {
             return;
         }
         logger.warn("[DB] credittransactions billingKey index not created", { error: msg });
+    }
+}
+
+/**
+ * Wave 1: foreign pricing shadow log (observe-only). TTL default 90 days.
+ */
+async function ensurePricingShadowLogIndexes(database) {
+    const coll = database.collection("pricing_shadow_log");
+    const ttlDays = Math.max(1, Number(process.env.PRICING_SHADOW_TTL_DAYS || 90) || 90);
+    const ttlSec = ttlDays * 24 * 3600;
+    try {
+        await coll.createIndex(
+            { callId: 1 },
+            {
+                name: "pricing_shadow_callId_unique",
+                unique: true,
+                partialFilterExpression: { callId: { $type: "string", $gt: "" } },
+            }
+        );
+        await coll.createIndex(
+            { createdAt: -1 },
+            { name: "pricing_shadow_createdAt_ttl", expireAfterSeconds: ttlSec }
+        );
+        await coll.createIndex(
+            { provider: 1, destIso: 1, createdAt: -1 },
+            { name: "pricing_shadow_provider_dest_created" }
+        );
+        logger.info("[DB] pricing_shadow_log indexes ensured", { ttlDays });
+    } catch (err) {
+        const msg = String(err.message || "");
+        if (err.code === 85 || err.code === 86 || /IndexOptionsConflict|already exists/i.test(msg)) {
+            logger.info("[DB] pricing_shadow_log index already present", { message: msg });
+            return;
+        }
+        logger.warn("[DB] pricing_shadow_log indexes not fully created", { error: msg });
     }
 }
