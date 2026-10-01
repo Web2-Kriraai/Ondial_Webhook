@@ -2956,6 +2956,12 @@ async function start() {
         //     }
         // }
         await connectDB();
+        try {
+            const { maybeWarnPricingHash } = require("./lib/pricingHashCheck");
+            maybeWarnPricingHash();
+        } catch {
+            /* ignore */
+        }
         await connectRedis();
         startWebhookWorkers().catch((err) => {
             logger.error("Failed to start webhook workers", { error: err.message });

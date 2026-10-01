@@ -1,4 +1,4 @@
-# Feature flags (Wave 0–2)
+# Feature flags (Wave 0–3)
 
 | Flag | Default | Scope | Purpose | Rollback |
 |---|---|---|---|---|
@@ -11,5 +11,10 @@
 | `ONDIAL_CREDIT_DEDUCTION_ENABLED` | unset=on | all | Existing kill switch | `0` |
 | `CALL_ECONOMICS_ENABLED` | `0` | twilio/telnyx | Write `call_economics` observe rows; never changes customer charge | Keep `0` |
 | `CALL_ECONOMICS_PROVIDERS` | `twilio,telnyx` | excludes pool | Providers that may write economics | Remove provider |
+| `PRICING_HASH_CHECK` | `0` | webhook startup | Warn if seed SHA ≠ canonical (never crash) | `0` |
+| `PRICING_MODULE_CANONICAL_HASH` | unset | webhook | Optional expected seed SHA override | unset |
+| `SA_BILLING_ALIGN_PRODUCTION` | `0` | Super-Admin only | Floor seconds + last-bracket + 6dp wallet | Keep `0` |
+| `WORKER_FLOOR_DURATION` | `0` | CS1 worker | Floor duration before brackets | Keep `0` |
+| `COMPUTE_COST_ROUND_SIX` | `0` | Ondial `computeCallUsageCost` | Round cost to 6dp instead of 5dp | Keep `0` |
 
-Wave 3+ flags (not enabled yet): `SA_BILLING_ALIGN_PRODUCTION`, `WORKER_FLOOR_DURATION`, `COMPUTE_COST_ROUND_SIX`, `CREDIT_HOLD_*`, `AUTH_MODE_*`, `BILLING_WALLET_SHADOW`, `PRICE_FLOOR_*`, `PRICING_HASH_CHECK`.
+Wave 4+ flags (not enabled yet): `CREDIT_HOLD_*`, `AUTH_MODE_*`, `BILLING_WALLET_SHADOW`, `PRICE_FLOOR_*`.
