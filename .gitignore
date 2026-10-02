@@ -7,4 +7,8 @@ node_modules
 ngrok.exe
 countryPricing.seed.snapshot.json
 **/countryPricing.seed.snapshot.json
+scripts/telnyx_us_rows.jsonl
+scripts/telnyx_country_summary.json
+scripts/telnyx_deck_vs_db_missing.json
+scripts/twilio_in_rows.jsonl
 

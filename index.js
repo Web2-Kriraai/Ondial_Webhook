@@ -1010,6 +1010,28 @@ app.post("/twilio/call-status", async (req, res) => {
                 credit: creditResult,
                 contactSync: contactSyncResult,
             });
+
+            // Mark CallLogs + TestCall terminal so wizard in-flight lock clears
+            // (Twilio previously only set twilio.status, leaving status=initiated).
+            try {
+                const {
+                    isTwilioTerminalStatus,
+                    finalizeTwilioTerminalCallRecords,
+                } = require("./lib/finalizeTwilioTerminalCall");
+                if (isTwilioTerminalStatus(status)) {
+                    await finalizeTwilioTerminalCallRecords({
+                        callSid: normalizedCallSid,
+                        callId: mappedCallId || twilioMapping?.call_id || null,
+                        twilioStatus: status,
+                        at: timestampValue,
+                    });
+                }
+            } catch (termErr) {
+                logger.warn("[Twilio] Terminal finalize failed (ignored)", {
+                    error: termErr?.message,
+                    CallSid: normalizedCallSid,
+                });
+            }
         } catch (err) {
             logger.error("[Twilio] Async call-status processing failed", {
                 error: err.message,
@@ -1451,6 +1473,34 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         });
     }
 
+    // Mark CallLogs + TestCall terminal so wizard in-flight lock clears
+    // (Telnyx previously only set telnyx.status, leaving root status=initiated).
+    let terminalFinalize = null;
+    if (isTerminalHangup) {
+        try {
+            const {
+                isTerminalProviderStatus,
+                finalizeTelnyxTerminalCallRecords,
+            } = require("./lib/finalizeTwilioTerminalCall");
+            const statusForFinalize = status || mappedStatus || "completed";
+            if (isTerminalProviderStatus(statusForFinalize) || eventType === "call.hangup") {
+                terminalFinalize = await finalizeTelnyxTerminalCallRecords({
+                    callControlId,
+                    callId: mappedCallId || telnyxMapping?.call_id || null,
+                    telnyxStatus: isTerminalProviderStatus(statusForFinalize)
+                        ? statusForFinalize
+                        : "completed",
+                    at: timestampIso ? new Date(timestampIso) : new Date(),
+                });
+            }
+        } catch (termErr) {
+            logger.warn("[Telnyx] Terminal finalize failed (ignored)", {
+                error: termErr?.message,
+                call_control_id: callControlId,
+            });
+        }
+    }
+
     const receiveStatus = mapTwilioCallStatusToReceiveStatus(status);
     emitCallUpdateSse({
         campaign_id: campaignId,
@@ -1483,6 +1533,7 @@ async function processTelnyxCallControlWebhook(parsed, body) {
         call_kind: isTestCall ? "TEST" : "NORMAL",
         credit: creditResult,
         contactSync: contactSyncResult,
+        terminalFinalize,
     };
 }
 
@@ -2025,6 +2076,28 @@ async function handleTelnyxConversation(req, res) {
         });
     } else if (telnyxCompleted && billableDuration <= 0) {
         creditResult = { outcome: "skip_no_duration_on_doc" };
+    }
+
+    if (telnyxCompleted) {
+        try {
+            const { finalizeTelnyxTerminalCallRecords } = require("./lib/finalizeTwilioTerminalCall");
+            await finalizeTelnyxTerminalCallRecords({
+                callControlId: sid,
+                callId:
+                    storedDoc?.call_id ||
+                    storedDoc?.call_unique_id ||
+                    dialerCallUniqueId ||
+                    telnyxMapping?.call_id ||
+                    null,
+                telnyxStatus: "completed",
+                at: new Date(),
+            });
+        } catch (termErr) {
+            logger.warn("[Telnyx] Conversation terminal finalize failed (ignored)", {
+                error: termErr?.message,
+                call_control_id: sid,
+            });
+        }
     }
 
     const conversationReceiveStatus = mapTwilioCallStatusToReceiveStatus(
