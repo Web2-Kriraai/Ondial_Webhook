@@ -4,6 +4,7 @@
 |---|---|---|---|---|
 | `PRICING_SHADOW_MODE` | `1` (on) | twilio/telnyx via providers list | Write `pricing_shadow_log` only; never changes charge | Set `0` |
 | `PRICING_BASIS` | `did` | foreign only when LIVE later | Live $/min basis: `did` \| `destination` \| `max_of_both` | Keep `did` |
+| `PRICING_DESTINATION_RATE` | `country` | when basis is destination / max_of_both | `country` = callee ISO matrix; `prefix` = matched prefix cost×commission, miss → country MAX×commission | Keep `country` |
 | `PRICING_BASIS_PROVIDERS` | `twilio,telnyx` | excludes pool | Which providers foreign pricing applies to | Remove provider or set empty |
 | `PRICING_MISSING_POLICY` | `m2` | shadow / future LIVE | `m2` fallback+log; `m1` strict for LIVE dest | `m2` |
 | `NANP_ISLAND_PREFIXES` | `1` (on) | phone→ISO | Enable `1809/1829/1849`→DO before `1`→US | `0` |
@@ -29,4 +30,4 @@
 | `AUTH_MODE_INBOUND_MAPPING` | `off` | inbound mapping | same | `off` |
 | `AUTH_MODE_TELNYX_WEBHOOKS` | `off` | Telnyx webhooks | same | `off` |
 
-**LIVE note:** `PRICING_BASIS` stays `did`. Destination / max_of_both are implemented but OFF. See `docs/RUNBOOK_PRICING_BASIS_FLIP.md`.
+**LIVE note:** `PRICING_BASIS` stays `did` by default. Destination / max_of_both are implemented but OFF until flip. With destination on, keep `PRICING_DESTINATION_RATE=country` unless you intentionally enable prefix-live (`prefix`). See `docs/RUNBOOK_PRICING_BASIS_FLIP.md`.

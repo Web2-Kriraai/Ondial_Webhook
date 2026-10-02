@@ -5,3 +5,6 @@
 .env.production
 node_modules
 ngrok.exe
+countryPricing.seed.snapshot.json
+**/countryPricing.seed.snapshot.json
+
