@@ -242,7 +242,12 @@ function verifyIngressAuth(req, { allowHmac = true, allowBearer = true, secretEn
 /** Wave 6: AUTH_MODE_* gate (off / log_only / enforce). Never throws. */
 function maybeAuthModeGate(req, res, group, checkOk) {
     try {
-        const { applyAuthModeGate } = require("./lib/authMode");
+        const { applyAuthModeGate, getAuthMode } = require("./lib/authMode");
+        // off → do not run verify (avoids noisy AUTH FAILED when Twilio/Telnyx
+        // carrier callbacks have no shared-secret headers).
+        if (getAuthMode(group) === "off") {
+            return false;
+        }
         let ok = false;
         let reason = "check_failed";
         try {
