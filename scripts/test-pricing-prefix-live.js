@@ -8,6 +8,10 @@ const {
     normalizeDestinationRateMode,
 } = require("../lib/pricingShadow");
 const { buildPrefixCandidates } = require("../lib/callEconomics");
+const {
+    destinationDigitsForPrefixLookup,
+    isoToDialCode,
+} = require("../lib/countryFromPhone");
 
 assert.strictEqual(sellFromCost(0.22, 40), 0.308);
 assert.strictEqual(sellFromCost(0.1651, 40), 0.23114);
@@ -17,6 +21,17 @@ assert.strictEqual(sellFromCost(-1, 40), null);
 assert.strictEqual(normalizeDestinationRateMode("prefix"), "prefix");
 assert.strictEqual(normalizeDestinationRateMode("country"), "country");
 assert.strictEqual(normalizeDestinationRateMode("weird"), "country");
+
+assert.strictEqual(isoToDialCode("IN"), "91");
+assert.strictEqual(isoToDialCode("US"), "1");
+assert.strictEqual(isoToDialCode("CA"), "1");
+assert.strictEqual(isoToDialCode("AE"), "971");
+assert.strictEqual(destinationDigitsForPrefixLookup("6353125194", "IN"), "916353125194");
+assert.strictEqual(destinationDigitsForPrefixLookup("+916353125194", "IN"), "916353125194");
+assert.strictEqual(destinationDigitsForPrefixLookup("0916353125194", "IN"), "916353125194");
+assert.strictEqual(destinationDigitsForPrefixLookup("7473357058", "US"), "17473357058");
+assert.strictEqual(destinationDigitsForPrefixLookup("+17473357058", "US"), "17473357058");
+assert.strictEqual(destinationDigitsForPrefixLookup("501234567", "AE"), "971501234567");
 
 {
     const c = buildPrefixCandidates("+971501234567");
@@ -300,7 +315,58 @@ const AE_CARDS = [
         assert.strictEqual(rPool.reason, "not_foreign");
     }
 
-    // 7) basis=did → no apply even with prefix mode
+    // 7) Local IN 10-digit (no +91) still longest-prefix matches after dial-code normalize
+    {
+        const cards = [
+            {
+                provider: "twilio",
+                countryIso: "IN",
+                destinationPrefix: "916353",
+                rateUsdPerMin: 0.0305,
+                effectiveFrom: new Date("2020-01-01"),
+            },
+            {
+                provider: "twilio",
+                countryIso: "IN",
+                destinationPrefix: "91",
+                rateUsdPerMin: 0.0351,
+                effectiveFrom: new Date("2020-01-01"),
+            },
+        ];
+        const db = makeDb({
+            cards,
+            commission: {
+                enabled: true,
+                defaultPercent: 45,
+                byProvider: { twilio: 45, telnyx: 40 },
+                byCountry: {},
+            },
+        });
+        const r = await resolveForeignLiveRateSelection({
+            db,
+            user: { creditPlan: { currentTier: "A" } },
+            campaign: {
+                numberPolicySnapshot: { provider: "twilio" },
+                selectedVoice: { tier: "standard" },
+                companyCountryIso: "IN",
+            },
+            callLogDoc: {
+                to: "6353125194",
+                contact_phone: "6353125194",
+            },
+            liveDidRate: 0.055,
+            liveDidIso: "US",
+            provider: "twilio",
+        });
+        assert.strictEqual(r.applied, true);
+        assert.strictEqual(r.rateSource, "prefix");
+        assert.strictEqual(r.matchedPrefix, "916353");
+        assert.strictEqual(r.providerCostUsdPerMin, 0.0305);
+        assert.strictEqual(r.selectedRate, sellFromCost(0.0305, 45));
+        assert.strictEqual(r.destIso, "IN");
+    }
+
+    // 8) basis=did → no apply even with prefix mode
     {
         process.env.PRICING_BASIS = "did";
         const r = await resolveForeignLiveRateSelection({
