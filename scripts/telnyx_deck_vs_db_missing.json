@@ -1,0 +1,896 @@
+{
+  "excelCountries": 228,
+  "excelRows": 164118,
+  "dbRows": 106448,
+  "fullyMissingCountries": 93,
+  "fullyMissingRows": 59837,
+  "partialCountries": 33,
+  "partialMissingRows": 19942,
+  "totalMissingRows": 79779,
+  "missingCountries": [
+    {
+      "iso": "PL",
+      "name": "Poland",
+      "excelRows": 27783,
+      "dbRows": 0,
+      "missingRows": 27783
+    },
+    {
+      "iso": "ZA",
+      "name": "South Africa",
+      "excelRows": 5788,
+      "dbRows": 0,
+      "missingRows": 5788
+    },
+    {
+      "iso": "PH",
+      "name": "Philippines",
+      "excelRows": 3873,
+      "dbRows": 0,
+      "missingRows": 3873
+    },
+    {
+      "iso": "RU",
+      "name": "Russian Federation",
+      "excelRows": 3044,
+      "dbRows": 0,
+      "missingRows": 3044
+    },
+    {
+      "iso": "TH",
+      "name": "Thailand",
+      "excelRows": 2822,
+      "dbRows": 0,
+      "missingRows": 2822
+    },
+    {
+      "iso": "SE",
+      "name": "Sweden",
+      "excelRows": 2617,
+      "dbRows": 0,
+      "missingRows": 2617
+    },
+    {
+      "iso": "MX",
+      "name": "Mexico",
+      "excelRows": 2081,
+      "dbRows": 0,
+      "missingRows": 2081
+    },
+    {
+      "iso": "SI",
+      "name": "Slovenia",
+      "excelRows": 1856,
+      "dbRows": 0,
+      "missingRows": 1856
+    },
+    {
+      "iso": "NO",
+      "name": "Norway",
+      "excelRows": 1453,
+      "dbRows": 0,
+      "missingRows": 1453
+    },
+    {
+      "iso": "SV",
+      "name": "El Salvador",
+      "excelRows": 1310,
+      "dbRows": 0,
+      "missingRows": 1310
+    },
+    {
+      "iso": "NL",
+      "name": "Netherlands",
+      "excelRows": 1026,
+      "dbRows": 0,
+      "missingRows": 1026
+    },
+    {
+      "iso": "VE",
+      "name": "Venezuela",
+      "excelRows": 988,
+      "dbRows": 0,
+      "missingRows": 988
+    },
+    {
+      "iso": "PE",
+      "name": "Peru",
+      "excelRows": 780,
+      "dbRows": 0,
+      "missingRows": 780
+    },
+    {
+      "iso": "PA",
+      "name": "Panama",
+      "excelRows": 481,
+      "dbRows": 0,
+      "missingRows": 481
+    },
+    {
+      "iso": "PT",
+      "name": "Portugal",
+      "excelRows": 415,
+      "dbRows": 0,
+      "missingRows": 415
+    },
+    {
+      "iso": "NG",
+      "name": "Nigeria",
+      "excelRows": 339,
+      "dbRows": 0,
+      "missingRows": 339
+    },
+    {
+      "iso": "TW",
+      "name": "Taiwan",
+      "excelRows": 283,
+      "dbRows": 0,
+      "missingRows": 283
+    },
+    {
+      "iso": "MY",
+      "name": "Malaysia",
+      "excelRows": 275,
+      "dbRows": 0,
+      "missingRows": 275
+    },
+    {
+      "iso": "RO",
+      "name": "Romania",
+      "excelRows": 259,
+      "dbRows": 0,
+      "missingRows": 259
+    },
+    {
+      "iso": "NI",
+      "name": "Nicaragua",
+      "excelRows": 205,
+      "dbRows": 0,
+      "missingRows": 205
+    },
+    {
+      "iso": "VN",
+      "name": "Vietnam",
+      "excelRows": 196,
+      "dbRows": 0,
+      "missingRows": 196
+    },
+    {
+      "iso": "SK",
+      "name": "Slovakia",
+      "excelRows": 140,
+      "dbRows": 0,
+      "missingRows": 140
+    },
+    {
+      "iso": "RE",
+      "name": "French Departments and Territories in the Indian Ocean",
+      "excelRows": 131,
+      "dbRows": 0,
+      "missingRows": 131
+    },
+    {
+      "iso": "SA",
+      "name": "Saudi Arabia",
+      "excelRows": 128,
+      "dbRows": 0,
+      "missingRows": 128
+    },
+    {
+      "iso": "MU",
+      "name": "Mauritius",
+      "excelRows": 99,
+      "dbRows": 0,
+      "missingRows": 99
+    },
+    {
+      "iso": "RS",
+      "name": "Serbia",
+      "excelRows": 93,
+      "dbRows": 0,
+      "missingRows": 93
+    },
+    {
+      "iso": "QA",
+      "name": "Qatar",
+      "excelRows": 92,
+      "dbRows": 0,
+      "missingRows": 92
+    },
+    {
+      "iso": "TT",
+      "name": "Trinidad and Tobago",
+      "excelRows": 82,
+      "dbRows": 0,
+      "missingRows": 82
+    },
+    {
+      "iso": "NP",
+      "name": "Nepal",
+      "excelRows": 74,
+      "dbRows": 0,
+      "missingRows": 74
+    },
+    {
+      "iso": "VI",
+      "name": "United States Virgin Islands",
+      "excelRows": 64,
+      "dbRows": 0,
+      "missingRows": 64
+    },
+    {
+      "iso": "UG",
+      "name": "Uganda",
+      "excelRows": 63,
+      "dbRows": 0,
+      "missingRows": 63
+    },
+    {
+      "iso": "UA",
+      "name": "Ukraine",
+      "excelRows": 60,
+      "dbRows": 0,
+      "missingRows": 60
+    },
+    {
+      "iso": "SO",
+      "name": "Somalia",
+      "excelRows": 57,
+      "dbRows": 0,
+      "missingRows": 57
+    },
+    {
+      "iso": "TR",
+      "name": "Turkey",
+      "excelRows": 52,
+      "dbRows": 0,
+      "missingRows": 52
+    },
+    {
+      "iso": "MT",
+      "name": "Malta",
+      "excelRows": 48,
+      "dbRows": 0,
+      "missingRows": 48
+    },
+    {
+      "iso": "NZ",
+      "name": "New Zealand",
+      "excelRows": 46,
+      "dbRows": 0,
+      "missingRows": 46
+    },
+    {
+      "iso": "VG",
+      "name": "British Virgin Islands",
+      "excelRows": 42,
+      "dbRows": 0,
+      "missingRows": 42
+    },
+    {
+      "iso": "MQ",
+      "name": "Martinique",
+      "excelRows": 40,
+      "dbRows": 0,
+      "missingRows": 40
+    },
+    {
+      "iso": "XK",
+      "name": "Kosovo",
+      "excelRows": 36,
+      "dbRows": 0,
+      "missingRows": 36
+    },
+    {
+      "iso": "OM",
+      "name": "Oman",
+      "excelRows": 32,
+      "dbRows": 0,
+      "missingRows": 32
+    },
+    {
+      "iso": "SC",
+      "name": "Seychelles",
+      "excelRows": 32,
+      "dbRows": 0,
+      "missingRows": 32
+    },
+    {
+      "iso": "TC",
+      "name": "Turks and Caicos",
+      "excelRows": 32,
+      "dbRows": 0,
+      "missingRows": 32
+    },
+    {
+      "iso": "TJ",
+      "name": "Tajikistan",
+      "excelRows": 31,
+      "dbRows": 0,
+      "missingRows": 31
+    },
+    {
+      "iso": "TN",
+      "name": "Tunisia",
+      "excelRows": 31,
+      "dbRows": 0,
+      "missingRows": 31
+    },
+    {
+      "iso": "PK",
+      "name": "Pakistan",
+      "excelRows": 30,
+      "dbRows": 0,
+      "missingRows": 30
+    },
+    {
+      "iso": "SM",
+      "name": "San Marino",
+      "excelRows": 28,
+      "dbRows": 0,
+      "missingRows": 28
+    },
+    {
+      "iso": "VC",
+      "name": "Saint Vincent and the Grenadines",
+      "excelRows": 27,
+      "dbRows": 0,
+      "missingRows": 27
+    },
+    {
+      "iso": "PY",
+      "name": "Paraguay",
+      "excelRows": 24,
+      "dbRows": 0,
+      "missingRows": 24
+    },
+    {
+      "iso": "NE",
+      "name": "Niger",
+      "excelRows": 23,
+      "dbRows": 0,
+      "missingRows": 23
+    },
+    {
+      "iso": "MR",
+      "name": "Mauritania",
+      "excelRows": 21,
+      "dbRows": 0,
+      "missingRows": 21
+    },
+    {
+      "iso": "TZ",
+      "name": "Tanzania",
+      "excelRows": 21,
+      "dbRows": 0,
+      "missingRows": 21
+    },
+    {
+      "iso": "SL",
+      "name": "Sierra Leone",
+      "excelRows": 20,
+      "dbRows": 0,
+      "missingRows": 20
+    },
+    {
+      "iso": "SR",
+      "name": "Suriname",
+      "excelRows": 20,
+      "dbRows": 0,
+      "missingRows": 20
+    },
+    {
+      "iso": "UZ",
+      "name": "Uzbekistan",
+      "excelRows": 18,
+      "dbRows": 0,
+      "missingRows": 18
+    },
+    {
+      "iso": "RW",
+      "name": "Rwanda",
+      "excelRows": 15,
+      "dbRows": 0,
+      "missingRows": 15
+    },
+    {
+      "iso": "SN",
+      "name": "Senegal",
+      "excelRows": 15,
+      "dbRows": 0,
+      "missingRows": 15
+    },
+    {
+      "iso": "UY",
+      "name": "Uruguay",
+      "excelRows": 15,
+      "dbRows": 0,
+      "missingRows": 15
+    },
+    {
+      "iso": "MZ",
+      "name": "Mozambique",
+      "excelRows": 14,
+      "dbRows": 0,
+      "missingRows": 14
+    },
+    {
+      "iso": "SG",
+      "name": "Singapore",
+      "excelRows": 13,
+      "dbRows": 0,
+      "missingRows": 13
+    },
+    {
+      "iso": "ZM",
+      "name": "Zambia",
+      "excelRows": 13,
+      "dbRows": 0,
+      "missingRows": 13
+    },
+    {
+      "iso": "SD",
+      "name": "Sudan",
+      "excelRows": 12,
+      "dbRows": 0,
+      "missingRows": 12
+    },
+    {
+      "iso": "MV",
+      "name": "Maldives",
+      "excelRows": 11,
+      "dbRows": 0,
+      "missingRows": 11
+    },
+    {
+      "iso": "TG",
+      "name": "Togo",
+      "excelRows": 11,
+      "dbRows": 0,
+      "missingRows": 11
+    },
+    {
+      "iso": "PW",
+      "name": "Palau",
+      "excelRows": 10,
+      "dbRows": 0,
+      "missingRows": 10
+    },
+    {
+      "iso": "PG",
+      "name": "Papua New Guinea",
+      "excelRows": 8,
+      "dbRows": 0,
+      "missingRows": 8
+    },
+    {
+      "iso": "TO",
+      "name": "Tonga",
+      "excelRows": 8,
+      "dbRows": 0,
+      "missingRows": 8
+    },
+    {
+      "iso": "MN",
+      "name": "Mongolia",
+      "excelRows": 7,
+      "dbRows": 0,
+      "missingRows": 7
+    },
+    {
+      "iso": "WS",
+      "name": "Samoa",
+      "excelRows": 7,
+      "dbRows": 0,
+      "missingRows": 7
+    },
+    {
+      "iso": "ZW",
+      "name": "Zimbabwe",
+      "excelRows": 7,
+      "dbRows": 0,
+      "missingRows": 7
+    },
+    {
+      "iso": "SS",
+      "name": "South Sudan",
+      "excelRows": 6,
+      "dbRows": 0,
+      "missingRows": 6
+    },
+    {
+      "iso": "SZ",
+      "name": "Swaziland",
+      "excelRows": 5,
+      "dbRows": 0,
+      "missingRows": 5
+    },
+    {
+      "iso": "YE",
+      "name": "Yemen",
+      "excelRows": 5,
+      "dbRows": 0,
+      "missingRows": 5
+    },
+    {
+      "iso": "TD",
+      "name": "Chad",
+      "excelRows": 4,
+      "dbRows": 0,
+      "missingRows": 4
+    },
+    {
+      "iso": "MW",
+      "name": "Malawi",
+      "excelRows": 4,
+      "dbRows": 0,
+      "missingRows": 4
+    },
+    {
+      "iso": "NA",
+      "name": "Namibia",
+      "excelRows": 4,
+      "dbRows": 0,
+      "missingRows": 4
+    },
+    {
+      "iso": "RE",
+      "name": "Reunion",
+      "excelRows": 4,
+      "dbRows": 0,
+      "missingRows": 4
+    },
+    {
+      "iso": "VU",
+      "name": "Vanuatu",
+      "excelRows": 4,
+      "dbRows": 0,
+      "missingRows": 4
+    },
+    {
+      "iso": "PM",
+      "name": "Saint Pierre and Miquelon",
+      "excelRows": 3,
+      "dbRows": 0,
+      "missingRows": 3
+    },
+    {
+      "iso": "PS",
+      "name": "West Bank",
+      "excelRows": 3,
+      "dbRows": 0,
+      "missingRows": 3
+    },
+    {
+      "iso": "MO",
+      "name": "Macao (China)",
+      "excelRows": 2,
+      "dbRows": 0,
+      "missingRows": 2
+    },
+    {
+      "iso": "YT",
+      "name": "Mayotte",
+      "excelRows": 2,
+      "dbRows": 0,
+      "missingRows": 2
+    },
+    {
+      "iso": "SY",
+      "name": "Syria",
+      "excelRows": 2,
+      "dbRows": 0,
+      "missingRows": 2
+    },
+    {
+      "iso": "TM",
+      "name": "Turkmenistan",
+      "excelRows": 2,
+      "dbRows": 0,
+      "missingRows": 2
+    },
+    {
+      "iso": "PF",
+      "name": "French Polynesia",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "MS",
+      "name": "Montserrat",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "NC",
+      "name": "New Caledonia",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "MP",
+      "name": "Northern Mariana Islands",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "PR",
+      "name": "Puerto Rico 1787",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "PR",
+      "name": "Puerto Rico 1939",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "SX",
+      "name": "Sint Maarten Dutch part",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "SB",
+      "name": "Solomon Islands",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "TL",
+      "name": "Timor-Leste",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    },
+    {
+      "iso": "WF",
+      "name": "Wallis and Futuna",
+      "excelRows": 1,
+      "dbRows": 0,
+      "missingRows": 1
+    }
+  ],
+  "shortCountries": [
+    {
+      "iso": "GB",
+      "name": "United Kingdom",
+      "excelRows": 24668,
+      "dbRows": 18197,
+      "missingRows": 6471
+    },
+    {
+      "iso": "LT",
+      "name": "Lithuania",
+      "excelRows": 7486,
+      "dbRows": 2497,
+      "missingRows": 4989
+    },
+    {
+      "iso": "LV",
+      "name": "Latvia",
+      "excelRows": 4547,
+      "dbRows": 2282,
+      "missingRows": 2265
+    },
+    {
+      "iso": "FR",
+      "name": "France",
+      "excelRows": 2322,
+      "dbRows": 591,
+      "missingRows": 1731
+    },
+    {
+      "iso": "EE",
+      "name": "Estonia",
+      "excelRows": 3426,
+      "dbRows": 1738,
+      "missingRows": 1688
+    },
+    {
+      "iso": "ES",
+      "name": "Spain",
+      "excelRows": 1533,
+      "dbRows": 967,
+      "missingRows": 566
+    },
+    {
+      "iso": "GT",
+      "name": "Guatemala",
+      "excelRows": 1224,
+      "dbRows": 679,
+      "missingRows": 545
+    },
+    {
+      "iso": "LU",
+      "name": "Luxembourg",
+      "excelRows": 414,
+      "dbRows": 166,
+      "missingRows": 248
+    },
+    {
+      "iso": "MM",
+      "name": "Myanmar",
+      "excelRows": 619,
+      "dbRows": 374,
+      "missingRows": 245
+    },
+    {
+      "iso": "IT",
+      "name": "Italy",
+      "excelRows": 603,
+      "dbRows": 415,
+      "missingRows": 188
+    },
+    {
+      "iso": "CY",
+      "name": "Cyprus",
+      "excelRows": 895,
+      "dbRows": 746,
+      "missingRows": 149
+    },
+    {
+      "iso": "GR",
+      "name": "Greece",
+      "excelRows": 211,
+      "dbRows": 72,
+      "missingRows": 139
+    },
+    {
+      "iso": "IE",
+      "name": "Ireland",
+      "excelRows": 281,
+      "dbRows": 145,
+      "missingRows": 136
+    },
+    {
+      "iso": "CZ",
+      "name": "Czech Republic",
+      "excelRows": 418,
+      "dbRows": 296,
+      "missingRows": 122
+    },
+    {
+      "iso": "HU",
+      "name": "Hungary",
+      "excelRows": 228,
+      "dbRows": 117,
+      "missingRows": 111
+    },
+    {
+      "iso": "GE",
+      "name": "Georgia",
+      "excelRows": 210,
+      "dbRows": 105,
+      "missingRows": 105
+    },
+    {
+      "iso": "HR",
+      "name": "Croatia",
+      "excelRows": 110,
+      "dbRows": 52,
+      "missingRows": 58
+    },
+    {
+      "iso": "FI",
+      "name": "Finland",
+      "excelRows": 105,
+      "dbRows": 61,
+      "missingRows": 44
+    },
+    {
+      "iso": "IS",
+      "name": "Iceland",
+      "excelRows": 84,
+      "dbRows": 42,
+      "missingRows": 42
+    },
+    {
+      "iso": "KE",
+      "name": "Kenya",
+      "excelRows": 122,
+      "dbRows": 92,
+      "missingRows": 30
+    },
+    {
+      "iso": "LI",
+      "name": "Liechtenstein",
+      "excelRows": 24,
+      "dbRows": 12,
+      "missingRows": 12
+    },
+    {
+      "iso": "GH",
+      "name": "Ghana",
+      "excelRows": 133,
+      "dbRows": 122,
+      "missingRows": 11
+    },
+    {
+      "iso": "IL",
+      "name": "Israel",
+      "excelRows": 25,
+      "dbRows": 17,
+      "missingRows": 8
+    },
+    {
+      "iso": "JP",
+      "name": "Japan",
+      "excelRows": 93,
+      "dbRows": 85,
+      "missingRows": 8
+    },
+    {
+      "iso": "IQ",
+      "name": "Iraq",
+      "excelRows": 43,
+      "dbRows": 37,
+      "missingRows": 6
+    },
+    {
+      "iso": "EG",
+      "name": "Egypt",
+      "excelRows": 14,
+      "dbRows": 9,
+      "missingRows": 5
+    },
+    {
+      "iso": "DE",
+      "name": "Germany",
+      "excelRows": 318,
+      "dbRows": 313,
+      "missingRows": 5
+    },
+    {
+      "iso": "KW",
+      "name": "Kuwait",
+      "excelRows": 8,
+      "dbRows": 4,
+      "missingRows": 4
+    },
+    {
+      "iso": "HN",
+      "name": "Honduras",
+      "excelRows": 406,
+      "dbRows": 403,
+      "missingRows": 3
+    },
+    {
+      "iso": "KR",
+      "name": "South Korea",
+      "excelRows": 54,
+      "dbRows": 51,
+      "missingRows": 3
+    },
+    {
+      "iso": "GF",
+      "name": "French Guiana",
+      "excelRows": 37,
+      "dbRows": 35,
+      "missingRows": 2
+    },
+    {
+      "iso": "GP",
+      "name": "Guadeloupe",
+      "excelRows": 79,
+      "dbRows": 77,
+      "missingRows": 2
+    },
+    {
+      "iso": "ID",
+      "name": "Indonesia",
+      "excelRows": 51,
+      "dbRows": 50,
+      "missingRows": 1
+    }
+  ]
+}
