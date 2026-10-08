@@ -115,6 +115,7 @@ async function resolveOutboundCollection() {
 
 const TWILIO_STATUS_EVENT = "twilio_call_status";
 const TELNYX_STATUS_EVENT = "telnyx_call_status";
+const FREJUN_STATUS_EVENT = "frejun_call_status";
 
 function buildTwilioStatusEvent({ CallSid, CallStatus, CallDuration, timestampIso }) {
     return {
@@ -284,6 +285,102 @@ async function upsertTwilioAnchoredCallLog({
         logger.error("[upsertTwilioAnchoredCallLog] Error during upsert", {
             error: err.message,
             twilio_call_sid: twilioCallSid,
+            collection: collectionName,
+        });
+        throw err;
+    }
+}
+
+function buildFrejunStatusEvent({ frejunCallId, eventType, eventId, durationSec, timestampIso, data }) {
+    return {
+        timestamp: new Date().toISOString(),
+        event_type: FREJUN_STATUS_EVENT,
+        data: {
+            frejun_call_id: frejunCallId,
+            event_type: eventType,
+            event_id: eventId || null,
+            CallDuration: durationSec == null ? null : durationSec,
+            Timestamp: timestampIso,
+            ...(data && typeof data === "object" ? data : {}),
+        },
+    };
+}
+
+/**
+ * Applies Frejun snapshot fields and appends one call_data event.
+ */
+async function mergeFrejunStatusIntoCallLog(collectionName, filter, frejunSetFields, eventDoc) {
+    const db = getDb();
+    const now = new Date();
+    const rootSet = { ...frejunSetFields, updatedAt: now };
+    const pipeline = [
+        { $set: { call_data: { $ifNull: ["$call_data", {}] } } },
+        { $set: { "call_data.events": { $ifNull: ["$call_data.events", []] } } },
+        { $set: { createdAt: { $ifNull: ["$createdAt", now] } } },
+        { $set: rootSet },
+        {
+            $set: {
+                "call_data.events": {
+                    $concatArrays: [{ $ifNull: ["$call_data.events", []] }, [eventDoc]],
+                },
+            },
+        },
+    ];
+    const result = await db.collection(collectionName).updateOne(filter, pipeline);
+    return result.matchedCount > 0;
+}
+
+/**
+ * One CallLog per Frejun call_id (cs_…). Dialer UUID shells are merged in via mapping.
+ */
+async function upsertFrejunAnchoredCallLog({
+    collectionName,
+    frejunCallId,
+    frejunSetFields,
+    eventDoc,
+    rootFromMapping,
+}) {
+    const db = getDb();
+    const coll = db.collection(collectionName);
+    try {
+        return await upsertCarrierAnchoredCallLog({
+            coll,
+            carrierNs: "frejun",
+            carrierField: "frejun.call_id",
+            carrierId: frejunCallId,
+            syntheticLeadId: `frejun:${frejunCallId}`,
+            setFields: frejunSetFields,
+            eventDoc,
+            rootFromMapping,
+        });
+    } catch (err) {
+        if (String(err?.message || "").includes("conflict")) {
+            const filter = { "frejun.call_id": frejunCallId };
+            const matched = await mergeFrejunStatusIntoCallLog(
+                collectionName,
+                filter,
+                { ...frejunSetFields, "frejun.call_id": frejunCallId },
+                eventDoc
+            );
+            if (!matched) {
+                await coll.updateOne(
+                    filter,
+                    {
+                        $set: {
+                            ...frejunSetFields,
+                            "frejun.call_id": frejunCallId,
+                            call_data: { events: [eventDoc] },
+                        },
+                        $setOnInsert: { createdAt: new Date(), recordingUrl: "" },
+                    },
+                    { upsert: true }
+                );
+            }
+            return { upserted: true };
+        }
+        logger.error("[upsertFrejunAnchoredCallLog] Error during upsert", {
+            error: err.message,
+            frejun_call_id: frejunCallId,
             collection: collectionName,
         });
         throw err;
@@ -691,6 +788,10 @@ module.exports = {
     mergeTelnyxStatusIntoCallLog,
     upsertTelnyxAnchoredCallLog,
     TELNYX_STATUS_EVENT,
+    buildFrejunStatusEvent,
+    mergeFrejunStatusIntoCallLog,
+    upsertFrejunAnchoredCallLog,
+    FREJUN_STATUS_EVENT,
     isUuidCallKey,
     mergeOutboundDuplicateCallLogs,
 };

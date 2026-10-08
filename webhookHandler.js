@@ -1816,9 +1816,11 @@ async function handleWebhook(body, meta = {}) {
 module.exports = {
     handleWebhook,
     updateByContactId,
+    updateStatus,
     didCallReachAnsweredStage,
     promotePoolConversationAnswered,
     enrichIdentityFromCallLog,
+    processOutboundHangupBilling,
 };
 
 async function beginDedupeProcessing(key) {

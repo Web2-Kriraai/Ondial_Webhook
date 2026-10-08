@@ -323,6 +323,83 @@ async function lookupTelnyxCallControlMapping(callControlId) {
     return raw ? JSON.parse(raw) : null;
 }
 
+function normalizeFrejunCallId(callId) {
+    if (!callId) return null;
+    const s = String(callId).trim();
+    if (!s.startsWith("cs_") || s.length <= 4) return null;
+    return s;
+}
+
+/**
+ * Store mapping for Frejun webhook correlation:
+ * frejun call_id (cs_…) -> { call_id, lead_id, campaign_id, contact_id }.
+ * Frejun webhooks do not echo custom_parameters — this mapping is required.
+ */
+async function registerFrejunCallIdMapping({
+    frejun_call_id,
+    call_id,
+    lead_id,
+    campaign_id,
+    contact_id,
+    collectionName,
+    is_test_call,
+}) {
+    const id = normalizeFrejunCallId(frejun_call_id);
+    if (!id) {
+        logger.warn("[CallMapping] Invalid frejun_call_id, cannot store mapping");
+        return;
+    }
+
+    const entry = {
+        frejun_call_id: id,
+        call_id: String(call_id || ""),
+        lead_id: String(lead_id || ""),
+        campaign_id: String(campaign_id || ""),
+        contact_id: String(contact_id || ""),
+        collectionName: collectionName ? String(collectionName) : "",
+        is_test_call: is_test_call === true,
+        updatedAt: Date.now(),
+    };
+
+    const redis = getRedis();
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(`map:frejun:id:${id}`, JSON.stringify(entry), "EX", ttlSec);
+
+    const dialerKey = normalizeCallId(entry.call_id);
+    if (dialerKey) {
+        await redis.set(
+            `map:dialer:${dialerKey}`,
+            JSON.stringify({
+                provider: "frejun",
+                frejun_call_id: id,
+                call_id: dialerKey,
+                lead_id: entry.lead_id,
+                campaign_id: entry.campaign_id,
+                contact_id: entry.contact_id,
+                collectionName: entry.collectionName || "",
+                is_test_call: entry.is_test_call === true,
+                updatedAt: Date.now(),
+            }),
+            "EX",
+            ttlSec
+        );
+    }
+
+    logger.info("[CallMapping] Stored Frejun call_id mapping", {
+        frejun_call_id: id,
+        call_id: dialerKey || null,
+        contact_id: entry.contact_id,
+    });
+}
+
+async function lookupFrejunCallIdMapping(frejunCallId) {
+    const id = normalizeFrejunCallId(frejunCallId);
+    if (!id) return null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:frejun:id:${id}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
 /**
  * Reverse lookup: dialer call_id / call_unique_id → carrier mapping entry.
  * Reads Redis `map:dialer:{call_id}` written by Twilio/Telnyx mapping registration.
@@ -350,5 +427,8 @@ module.exports = {
     registerTelnyxCallControlMapping,
     lookupTelnyxCallControlMapping,
     normalizeTelnyxCallControlId,
+    registerFrejunCallIdMapping,
+    lookupFrejunCallIdMapping,
+    normalizeFrejunCallId,
     lookupDialerCallMapping,
 };

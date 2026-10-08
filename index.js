@@ -15,6 +15,8 @@ const {
     registerTelnyxCallControlMapping,
     lookupTelnyxCallControlMapping,
     normalizeTelnyxCallControlId,
+    registerFrejunCallIdMapping,
+    normalizeFrejunCallId,
 } = require("./callMapping");
 const {
     createCallLog,
@@ -27,7 +29,10 @@ const {
     buildTelnyxStatusEvent,
     mergeTelnyxStatusIntoCallLog,
     upsertTelnyxAnchoredCallLog,
+    buildFrejunStatusEvent,
+    upsertFrejunAnchoredCallLog,
 } = require("./callLogs");
+const { processFrejunWebhook } = require("./lib/frejunWebhook");
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
@@ -1192,6 +1197,158 @@ app.post("/api/telnyx-mapping", async (req, res) => {
     }
 });
 
+// ─── Frejun call_id (cs_…) Mapping ────────────────────────────────────────────
+// Receives: { frejun_call_id | call_id (cs_…), call_id (dialer UUID), lead_id?, campaign_id, contact_id }
+// Called by CS1 / test-predefined-call right after initiate returns data.id.
+app.post("/api/frejun-mapping", async (req, res) => {
+    if (
+        maybeAuthModeGate(req, res, "mapping", () =>
+            verifyIngressAuth(req, { allowHmac: false, secretEnv: "WEBHOOK_INTERNAL_SECRET" })
+        )
+    ) {
+        return;
+    }
+    res.status(200).json({ received: true });
+
+    const body = req.body || {};
+    const sid = normalizeFrejunCallId(
+        body.frejun_call_id ||
+            body.frejunCallId ||
+            (String(body.call_id || "").startsWith("cs_") ? body.call_id : null) ||
+            body.data?.id
+    );
+    const callIdNorm = normalizeCallId(
+        (String(body.call_id || "").startsWith("cs_")
+            ? body.call_unique_id || body.callUniqueId
+            : body.call_id) ||
+            body.call_unique_id ||
+            body.callUniqueId
+    );
+    const leadIdStr = body.lead_id != null ? String(body.lead_id).trim() : "";
+    const contactId = body.contact_id != null ? String(body.contact_id).trim() : "";
+    const campaignId = body.campaign_id != null ? String(body.campaign_id).trim() : "";
+
+    logger.info("[FrejunMapping] Mapping received", {
+        frejun_call_id: sid || null,
+        call_id: callIdNorm || null,
+        lead_id: leadIdStr || null,
+        campaign_id: campaignId || null,
+        contact_id: contactId || null,
+    });
+    logProviderApiHit(req, {
+        provider: "frejun",
+        api: "mapping",
+        expectedRoute: "/api/frejun-mapping",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            frejun_call_id: sid || null,
+            call_id: callIdNorm || null,
+            lead_id: leadIdStr || null,
+            is_test_call:
+                body.is_test_call === true ||
+                body.isTestCall === true ||
+                body.is_test_call === "true",
+            test_signal: "frejun-mapping body",
+        },
+    });
+
+    if (!sid) {
+        logger.warn("[FrejunMapping] Missing frejun_call_id (cs_…) — skipping", body);
+        await logMissingCallMapping({
+            source: "frejun_mapping_endpoint",
+            reason: "missing_frejun_call_id",
+            contact_id: contactId || null,
+            campaign_id: campaignId || null,
+            body_preview: previewPayload(body),
+        });
+        return;
+    }
+
+    const targetCollection =
+        (body.collectionName && String(body.collectionName).trim()) ||
+        resolveCollection({ contact_id: contactId }) ||
+        (await resolveOutboundCollection());
+
+    try {
+        await registerFrejunCallIdMapping({
+            frejun_call_id: sid,
+            call_id: callIdNorm || "",
+            lead_id: leadIdStr,
+            campaign_id: campaignId,
+            contact_id: contactId,
+            collectionName: targetCollection,
+            is_test_call:
+                body.is_test_call === true ||
+                body.isTestCall === true ||
+                body.is_test_call === "true",
+        });
+
+        const setPayload = {
+            "frejun.call_id": sid,
+            "frejun.status": "mapped",
+            "frejun.mappedAt": new Date().toISOString(),
+            "frejun.updatedAt": new Date().toISOString(),
+        };
+        if (campaignId) setPayload["frejun.campaign_id"] = campaignId;
+        if (contactId) setPayload["frejun.contact_id"] = contactId;
+        if (callIdNorm) {
+            setPayload.call_unique_id = callIdNorm;
+            setPayload["frejun.external_call_id"] = callIdNorm;
+        }
+        if (
+            inferIsTestCallFromWebhookBody(body) ||
+            body.is_test_call === true ||
+            body.isTestCall === true
+        ) {
+            setPayload.isTestCall = true;
+        } else {
+            setPayload.isTestCall = false;
+        }
+
+        const eventDoc = buildFrejunStatusEvent({
+            frejunCallId: sid,
+            eventType: "mapped",
+            eventId: null,
+            durationSec: null,
+            timestampIso: new Date().toISOString(),
+            data: {
+                call_id: callIdNorm || null,
+                lead_id: leadIdStr || null,
+                campaign_id: campaignId || null,
+                contact_id: contactId || null,
+            },
+        });
+
+        const anchored = await upsertFrejunAnchoredCallLog({
+            collectionName: targetCollection,
+            frejunCallId: sid,
+            frejunSetFields: setPayload,
+            eventDoc,
+            rootFromMapping: {
+                campaign_id: campaignId,
+                contact_id: contactId,
+                lead_id: leadIdStr,
+                call_id: callIdNorm || "",
+            },
+        });
+
+        logger.info("[FrejunMapping] Stored mapping", {
+            frejun_call_id: sid,
+            call_id: callIdNorm || null,
+            contact_id: contactId || null,
+            collection: targetCollection,
+            callLogAnchored: !!anchored,
+        });
+    } catch (err) {
+        logger.error("[FrejunMapping] Failed to store mapping", {
+            error: err.message,
+            frejun_call_id: sid,
+        });
+    }
+});
+
 /**
  * Deduplicate Telnyx webhook event ids (retries / concurrent delivery).
  * @returns {Promise<boolean>} true if this is the first time we see the event
@@ -1667,6 +1824,66 @@ async function handleTelnyxWebhooks(req, res) {
 }
 
 app.post("/telnyx/webhooks", handleTelnyxWebhooks);
+
+/**
+ * Frejun Voice App / SIP Trunk status callbacks.
+ * Point status_callback_url at POST /frejun/webhooks.
+ * Events correlate via frejun_call_id (cs_…) mapped after initiate — no custom_parameters.
+ */
+async function handleFrejunWebhooks(req, res) {
+    if (
+        maybeAuthModeGate(req, res, "frejun_status", () =>
+            verifyIngressAuth(req, {
+                allowHmac: true,
+                allowBearer: true,
+                secretEnv: "WEBHOOK_SHARED_SECRET",
+            })
+        )
+    ) {
+        return;
+    }
+
+    const body = req.body || {};
+    logProviderApiHit(req, {
+        provider: "frejun",
+        api: "webhooks",
+        expectedRoute: "/frejun/webhooks",
+        action: "received",
+        body,
+        logger,
+        extra: {
+            event_type: body.type || body.event || null,
+            event_id: body.id || null,
+            call_id: body.call_id || body.data?.call_id || null,
+        },
+    });
+
+    // Ack fast — Frejun retries on slow/non-2xx responses.
+    res.status(200).json({ received: true });
+
+    setImmediate(() => {
+        processFrejunWebhook(body)
+            .then((result) => {
+                logger.info("[Frejun] Webhook processed", {
+                    outcome: result?.outcome || null,
+                    event_type: body.type || body.event || null,
+                    event_id: body.id || null,
+                    call_id: body.call_id || body.data?.call_id || null,
+                });
+            })
+            .catch((err) => {
+                logger.error("[Frejun] Async webhook processing failed", {
+                    error: err.message,
+                    event_type: body.type || body.event || null,
+                    event_id: body.id || null,
+                    call_id: body.call_id || body.data?.call_id || null,
+                });
+            });
+    });
+}
+
+app.post("/frejun/webhooks", handleFrejunWebhooks);
+app.post("/api/frejun/webhooks", handleFrejunWebhooks);
 
 /**
  * Hangup is a destructive control action: an unauthenticated caller who guesses or
