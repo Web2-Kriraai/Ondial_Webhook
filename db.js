@@ -61,6 +61,7 @@ async function ensureIndexes(database) {
     );
     await ensureCreditTransactionBillingKeyIndex(database);
     await ensurePricingShadowLogIndexes(database);
+    await ensureAnalysisDedupeIndexes(database);
     try {
         const { ensureCallEconomicsIndexes } = require("./lib/callEconomics");
         await ensureCallEconomicsIndexes(database);
@@ -399,6 +400,28 @@ async function ensureCreditTransactionBillingKeyIndex(database) {
             "[DB] FATAL — unique billingKey index could not be created; double-charge protection degraded",
             { error: msg, code: err.code }
         );
+    }
+}
+
+/**
+ * call_analysis alias lookups (one doc per real call) + Mongo fallback trigger-lock expiry.
+ */
+async function ensureAnalysisDedupeIndexes(database) {
+    try {
+        const analysis = database.collection("call_analysis");
+        await analysis.createIndex(
+            { carrier_call_id: 1 },
+            { name: "carrier_call_id_sparse", sparse: true }
+        );
+        await analysis.createIndex(
+            { input_call_id: 1 },
+            { name: "input_call_id_sparse", sparse: true }
+        );
+        await database
+            .collection("analysis_trigger_locks")
+            .createIndex({ expiresAt: 1 }, { name: "expiresAt_ttl", expireAfterSeconds: 0 });
+    } catch (err) {
+        logger.warn("[DB] analysis dedupe indexes not fully created", { error: err.message });
     }
 }
 

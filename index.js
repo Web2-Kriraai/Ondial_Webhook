@@ -15,6 +15,7 @@ const {
     registerTelnyxCallControlMapping,
     lookupTelnyxCallControlMapping,
     normalizeTelnyxCallControlId,
+    markLatestCallForContact,
 } = require("./callMapping");
 const {
     createCallLog,
@@ -655,6 +656,13 @@ app.post("/api/twilio-mapping", async (req, res) => {
             collectionName: targetCollection,
             is_test_call: body?.is_test_call === true || body?.is_test_call === "true",
         });
+        await markLatestCallForContact({
+            contact_id: contactId,
+            carrier_call_id: sid,
+            provider: "twilio",
+        }).catch((err) =>
+            logger.warn("[Twilio] latest-call index write failed", { CallSid: sid, error: err.message })
+        );
 
         const setPayload = {
             "twilio.call_sid": sid,
@@ -961,6 +969,7 @@ app.post("/twilio/call-status", async (req, res) => {
                       contactIdRaw: contactForSync,
                       twilioStatus: status,
                       callSid: normalizedCallSid,
+                      callStartedAt: twilioMapping?.updatedAt || null,
                       source: "twilio_call_status",
                   })
                 : { outcome: "skip_no_contact_id" };
@@ -1127,6 +1136,13 @@ app.post("/api/telnyx-mapping", async (req, res) => {
             collectionName: targetCollection,
             is_test_call: body.is_test_call === true || body.isTestCall === true || body.is_test_call === "true",
         });
+        await markLatestCallForContact({
+            contact_id: contactId,
+            carrier_call_id: sid,
+            provider: "telnyx",
+        }).catch((err) =>
+            logger.warn("[Telnyx] latest-call index write failed", { call_control_id: sid, error: err.message })
+        );
 
         const setPayload = {
             "telnyx.call_control_id": sid,
@@ -1303,7 +1319,17 @@ async function processTelnyxCallControlWebhook(parsed, body) {
     const db = getDb();
     const existingDoc = await db.collection(collectionName).findOne(
         { "telnyx.call_control_id": callControlId },
-        { projection: { "telnyx.answeredAt": 1, "telnyx.status": 1, campaign_id: 1, contact_id: 1, isTestCall: 1 } }
+        {
+            projection: {
+                "telnyx.answeredAt": 1,
+                "telnyx.status": 1,
+                "telnyx.mappedAt": 1,
+                createdAt: 1,
+                campaign_id: 1,
+                contact_id: 1,
+                isTestCall: 1,
+            },
+        }
     );
 
     const mappedStatus = mapTelnyxEventToCallStatus(eventType, { hangupCause });
@@ -1454,6 +1480,10 @@ async function processTelnyxCallControlWebhook(parsed, body) {
             status: mappedStatus,
             hangupCause,
             callControlId,
+            callStartedAt:
+                existingDoc?.createdAt ||
+                existingDoc?.telnyx?.mappedAt ||
+                (telnyxMapping && !telnyxMapping.recovered_from ? telnyxMapping.updatedAt : null),
             source: "telnyx_webhooks",
         });
     } else if (!contactId) {
@@ -2047,6 +2077,7 @@ async function handleTelnyxConversation(req, res) {
                 "telnyx.conversation.turnCount": 1,
                 "telnyx.status": 1,
                 "telnyx.duration": 1,
+                "telnyx.mappedAt": 1,
                 isTestCall: 1,
             },
         }
@@ -2064,6 +2095,8 @@ async function handleTelnyxConversation(req, res) {
             contactIdRaw: contactForSync,
             status: telnyxStatusForContact,
             callControlId: sid,
+            callStartedAt:
+                storedDoc?.createdAt || storedDoc?.telnyx?.mappedAt || telnyxMapping?.updatedAt || null,
             source: "telnyx_conversation",
         });
     }
@@ -2382,6 +2415,7 @@ async function handleTwilioConversation(req, res) {
                 "twilio.conversation.turnCount": 1,
                 "twilio.status": 1,
                 "twilio.duration": 1,
+                "twilio.mappedAt": 1,
                 isTestCall: 1,
             },
         }
@@ -2403,6 +2437,8 @@ async function handleTwilioConversation(req, res) {
             contactIdRaw: contactForSync,
             twilioStatus: twilioStatusForContact,
             callSid: sid,
+            callStartedAt:
+                storedDoc?.createdAt || storedDoc?.twilio?.mappedAt || twilioMapping?.updatedAt || null,
             source: "twilio_conversation",
         });
     }

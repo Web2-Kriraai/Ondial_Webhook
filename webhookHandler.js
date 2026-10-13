@@ -1759,14 +1759,47 @@ function normalizeWebhookPayload(body) {
 
 // ─── Main Router ──────────────────────────────────────────────────────────────
 
-async function reserveReplayNonce(meta = {}) {
+function replayNonceKey(meta = {}) {
     const eventId = meta?.eventId ? String(meta.eventId).trim() : '';
-    if (!eventId) return { ok: true };
+    return eventId ? `replay:event:${eventId}` : null;
+}
+
+/**
+ * Reserve the event-id nonce as "processing" (short TTL). It becomes "done" only after
+ * handleWebhook succeeds; on failure it is released so the BullMQ retry really re-processes.
+ */
+async function reserveReplayNonce(meta = {}) {
+    const key = replayNonceKey(meta);
+    if (!key) return { ok: true, key: null };
     const redis = getRedis();
-    const key = `replay:event:${eventId}`;
-    const setOk = await redis.set(key, '1', 'EX', REPLAY_NONCE_TTL_SEC, 'NX');
-    if (setOk !== 'OK') return { ok: false, reason: 'replay_event_id' };
-    return { ok: true };
+    const owner = `processing:${meta?.jobId != null ? String(meta.jobId) : ''}`;
+    const setOk = await redis.set(key, owner, 'PX', PROCESSING_TTL_MS, 'NX');
+    if (setOk === 'OK') return { ok: true, key };
+    const current = await redis.get(key);
+    // Same BullMQ job retrying after a crashed attempt that never released: take it over.
+    if (meta?.jobId != null && current === owner) {
+        await redis.set(key, owner, 'PX', PROCESSING_TTL_MS);
+        return { ok: true, key };
+    }
+    return {
+        ok: false,
+        key,
+        reason: String(current || '').startsWith('processing') ? 'replay_event_id_inflight' : 'replay_event_id',
+    };
+}
+
+async function markReplayNonceDone(key) {
+    if (!key) return;
+    await getRedis().set(key, 'done', 'EX', REPLAY_NONCE_TTL_SEC);
+}
+
+async function releaseReplayNonce(key) {
+    if (!key) return;
+    try {
+        await getRedis().del(key);
+    } catch (err) {
+        logger.warn('[Webhook] Replay nonce release failed', { key, error: err.message });
+    }
 }
 
 async function handleWebhook(body, meta = {}) {
@@ -1776,13 +1809,23 @@ async function handleWebhook(body, meta = {}) {
         return;
     }
     const genericKey = `payload:${payloadHash(body)}`;
-    const dedupeState = await beginDedupeProcessing(genericKey);
+    let dedupeState;
+    try {
+        dedupeState = await beginDedupeProcessing(genericKey);
+    } catch (err) {
+        await releaseReplayNonce(replay.key);
+        throw err;
+    }
     if (dedupeState.skip) {
         logger.info(
             dedupeState.inflight
                 ? "[Webhook] Payload processing already in-flight, skipping duplicate"
                 : "[Webhook] Duplicate payload skipped"
         );
+        // Same semantics as the payload hash: already processed → nonce done; in-flight → let
+        // the in-flight run own it (release ours so its failure/retry is not blocked).
+        if (dedupeState.inflight) await releaseReplayNonce(replay.key);
+        else await markReplayNonceDone(replay.key);
         return;
     }
     try {
@@ -1807,8 +1850,10 @@ async function handleWebhook(body, meta = {}) {
             logger.warn("[Webhook] Unknown payload shape, skipping");
         }
         await markDedupeProcessed(genericKey);
+        await markReplayNonceDone(replay.key);
     } catch (err) {
         await clearDedupeProcessing(genericKey);
+        await releaseReplayNonce(replay.key);
         throw err;
     }
 }

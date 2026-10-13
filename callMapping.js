@@ -167,6 +167,36 @@ async function hasAnsweredFlag(callId, phoneRaw) {
     return false;
 }
 
+/**
+ * Latest carrier call registered for a contact (dialer mapping endpoints only).
+ * Used to recognise late status / conversation events for an older call of the same contact.
+ */
+async function markLatestCallForContact({ contact_id, carrier_call_id, provider }) {
+    const contactId = String(contact_id || "").trim();
+    const carrierId = String(carrier_call_id || "").trim();
+    if (!contactId || !carrierId) return;
+    const redis = getRedis();
+    const ttlSec = Math.ceil(TTL_MS / 1000);
+    await redis.set(
+        `map:contact:latestcall:${contactId}`,
+        JSON.stringify({
+            carrier_call_id: carrierId,
+            provider: provider || "",
+            registeredAt: Date.now(),
+        }),
+        "EX",
+        ttlSec
+    );
+}
+
+async function lookupLatestCallForContact(contactId) {
+    const key = String(contactId || "").trim();
+    if (!key) return null;
+    const redis = getRedis();
+    const raw = await redis.get(`map:contact:latestcall:${key}`);
+    return raw ? JSON.parse(raw) : null;
+}
+
 function normalizeTwilioCallSid(callSid) {
     if (!callSid) return null;
     const sid = String(callSid).trim();
@@ -351,4 +381,6 @@ module.exports = {
     lookupTelnyxCallControlMapping,
     normalizeTelnyxCallControlId,
     lookupDialerCallMapping,
+    markLatestCallForContact,
+    lookupLatestCallForContact,
 };

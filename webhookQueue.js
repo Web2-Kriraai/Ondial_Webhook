@@ -49,7 +49,7 @@ async function startWebhookWorkers() {
     worker = new Worker(
         QUEUE_NAME,
         async (job) => {
-            await handleWebhook(job.data?.payload || {}, job.data?.meta || {});
+            await handleWebhook(job.data?.payload || {}, { ...(job.data?.meta || {}), jobId: job.id });
         },
         {
             connection,
