@@ -120,6 +120,8 @@ echo "Health check 1 passed"
 
 PREV_DIR="$RELEASES_DIR/$SHA-prev"
 sudo mkdir -p "$RELEASES_DIR"
+# Keep only the newest rollback copy before adding a new one (disk was filling with full copies)
+sudo bash -c "cd \"$RELEASES_DIR\" && ls -1dt -- *-prev 2>/dev/null | tail -n +2 | xargs -r rm -rf --"
 if [ -d "$TARGET_DIR" ]; then
   sudo mkdir -p "$PREV_DIR"
   sudo rsync -a --exclude='.git' --exclude='.env' --exclude='.env.*' --include='.env.example' "$TARGET_DIR/" "$PREV_DIR/"
