@@ -2,7 +2,7 @@
  * Offline checks: per-minute rate override selection (points 13/14).
  *  - Org member's own billingOverride (enabled) prices the call; the admin wallet still pays.
  *  - Member override disabled → admin (wallet) override.
- *  - basic voice tier uses basicRatePerMinute; with only standardRatePerMinute set → normal pricing.
+ *  - old basic voice tier bills as standard (standardRatePerMinute, standard country price).
  * Run: node --test scripts/test-billing-override-source.js
  */
 const assert = require("node:assert/strict");
@@ -244,57 +244,46 @@ test("creator multiplier applies to creator tier rate", async () => {
     assert.equal(f.credits(f.adminId), 98.5);
 });
 
-test("basic voice tier uses basicRatePerMinute", async () => {
+test("old basic voice tier uses the standard override rate", async () => {
     const f = fixture({
         voiceTier: "basic",
-        adminOverride: { enabled: true, basicRatePerMinute: 0.25, standardRatePerMinute: 1 },
+        adminOverride: { enabled: true, standardRatePerMinute: 1 },
     });
     const res = await f.run();
-    assert.deepEqual(res, { outcome: "deducted", cost: 0.25 });
+    assert.deepEqual(res, { outcome: "deducted", cost: 1 });
     assert.equal(f.txs()[0].reference.billingOverrideSource, "wallet");
 });
 
-test("basic voice tier with only standardRatePerMinute → normal pricing", async () => {
+test("flat rate wins for an old basic campaign", async () => {
     const f = fixture({
         voiceTier: "basic",
-        memberOverride: { enabled: true, standardRatePerMinute: 1 },
-    });
-    const res = await f.run();
-    assert.deepEqual(res, { outcome: "deducted", cost: 0.5 });
-    assert.equal(f.credits(f.adminId), 99.5);
-    assert.equal(f.txs()[0].reference.billingOverrideSource, null);
-});
-
-test("flat rate wins over basic tier rate", async () => {
-    const f = fixture({
-        voiceTier: "basic",
-        adminOverride: { enabled: true, flatRatePerMinute: 0.75, basicRatePerMinute: 0.25 },
+        adminOverride: { enabled: true, flatRatePerMinute: 0.75, standardRatePerMinute: 0.25 },
     });
     const res = await f.run();
     assert.deepEqual(res, { outcome: "deducted", cost: 0.75 });
 });
 
 // Point 12: multiplier scales whatever the call costs; 0 / empty = no multiplier.
+// Standard voice, no country config in the fake DB → built-in IN default 0.055/min.
 test("multiplier alone scales the normal price (discount)", async () => {
-    // Basic voice → package price 0.5 (no country price for basic).
-    const f = fixture({ voiceTier: "basic", adminOverride: { enabled: true, chargeMultiplier: 0.8 } });
+    const f = fixture({ adminOverride: { enabled: true, chargeMultiplier: 0.8 } });
     const res = await f.run();
-    assert.deepEqual(res, { outcome: "deducted", cost: 0.4 });
+    assert.deepEqual(res, { outcome: "deducted", cost: 0.044 });
     assert.equal(f.txs()[0].reference.billingOverrideSource, "wallet");
 });
 
 test("multiplier with a rate for another voice tier scales the normal price", async () => {
     const f = fixture({
-        voiceTier: "basic",
+        voiceTier: "premium",
         adminOverride: { enabled: true, standardRatePerMinute: 1, chargeMultiplier: 1.2 },
     });
     const res = await f.run();
-    assert.deepEqual(res, { outcome: "deducted", cost: 0.6 });
+    assert.deepEqual(res, { outcome: "deducted", cost: 0.066 });
 });
 
 test("multiplier 0 is ignored (never a free call)", async () => {
-    const f = fixture({ voiceTier: "basic", adminOverride: { enabled: true, chargeMultiplier: 0 } });
+    const f = fixture({ adminOverride: { enabled: true, chargeMultiplier: 0 } });
     const res = await f.run();
-    assert.deepEqual(res, { outcome: "deducted", cost: 0.5 });
+    assert.deepEqual(res, { outcome: "deducted", cost: 0.055 });
     assert.equal(f.txs()[0].reference.billingOverrideSource, null);
 });
