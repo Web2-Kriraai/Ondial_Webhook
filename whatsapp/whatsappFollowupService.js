@@ -145,7 +145,7 @@ function isWhatsappConversationWindowOpen(contact, nowMs = Date.now()) {
   return lastReply > 0 && nowMs - lastReply < 24 * 60 * 60 * 1000;
 }
 
-async function sendWhatsappSessionFollowup(db, { user, campaign, contact, analysis, text }) {
+async function sendWhatsappSessionFollowup(db, { user, campaign, contact, analysis, text, billingUser = null }) {
   const profile = findWhatsappProfile(user, campaign?.followupWhatsappProfileId);
   if (!profile) {
     return { success: false, error: "WhatsApp profile not found on campaign" };
@@ -163,6 +163,7 @@ async function sendWhatsappSessionFollowup(db, { user, campaign, contact, analys
 
   const sessionResult = await sendWhatsappSessionReply(db, {
     user,
+    billingUser: billingUser || user,
     profile,
     phone: phoneResult.phone,
     text: body,
@@ -211,7 +212,14 @@ async function sendWhatsappSessionFollowup(db, { user, campaign, contact, analys
 /**
  * Window open → free-text from analysis draft; window closed → approved template.
  */
-async function sendWhatsappFollowupOrSession(db, { user, campaign, contact, analysis = null, forceTemplate = false }) {
+async function sendWhatsappFollowupOrSession(db, {
+  user,
+  campaign,
+  contact,
+  analysis = null,
+  forceTemplate = false,
+  billingUser = null,
+}) {
   if (!forceTemplate && isWhatsappConversationWindowOpen(contact)) {
     const analysisData = analysis?.analysis_data || analysis?.analysisData || null;
     const draft = getWhatsappDraftFromAnalysis(analysisData);
@@ -223,11 +231,12 @@ async function sendWhatsappFollowupOrSession(db, { user, campaign, contact, anal
         contact,
         analysis,
         text,
+        billingUser,
       });
       if (sessionResult.success) return sessionResult;
     }
   }
-  return sendWhatsappFollowup(db, { user, campaign, contact, analysis });
+  return sendWhatsappFollowup(db, { user, campaign, contact, analysis, billingUser });
 }
 
 async function resolveFollowupWhatsappTemplate(db, user, campaign, preferredTemplateId = null) {
@@ -301,8 +310,11 @@ async function resolveFollowupWhatsappTemplate(db, user, campaign, preferredTemp
 
 /**
  * Send campaign WhatsApp template (Meta). Used for first follow-up and window-closed re-engagement.
+ * `user` (creator) owns the profile / templates / provider; `billingUser` (org admin wallet,
+ * defaults to `user`) is checked before send and debited after.
  */
-async function sendWhatsappFollowup(db, { user, campaign, contact, analysis = null }) {
+async function sendWhatsappFollowup(db, { user, campaign, contact, analysis = null, billingUser = null }) {
+  const payer = billingUser || user;
   const profile = findWhatsappProfile(user, campaign?.followupWhatsappProfileId);
   if (!profile) {
     return { success: false, error: "WhatsApp profile not found on campaign" };
@@ -338,7 +350,7 @@ async function sendWhatsappFollowup(db, { user, campaign, contact, analysis = nu
 
   const usesPlatform = Boolean(profile.usesPlatformAccount);
   const cost = await getWhatsappSendCost(db, usesPlatform, "template");
-  if (cost > 0 && (Number(user?.credits) || 0) < cost) {
+  if (cost > 0 && (Number(payer?.credits) || 0) < cost) {
     return { success: false, error: "insufficient_credits" };
   }
 
@@ -396,7 +408,7 @@ async function sendWhatsappFollowup(db, { user, campaign, contact, analysis = nu
 
   const messageId = response.messageId || null;
   const deduct = await deductWhatsappCredits(db, {
-    user,
+    user: payer,
     cost,
     kind: "template",
     senderMode: usesPlatform ? "platform" : "own",

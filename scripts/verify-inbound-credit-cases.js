@@ -261,7 +261,8 @@ function assert(name, cond, detail) {
             createdIds.push(insuffIns.insertedId);
 
             const snap = await db.collection("users").findOne({ _id: uid }, { projection: { credits: 1 } });
-            await db.collection("users").updateOne({ _id: uid }, { $set: { credits: 0.000001 } });
+            // 0 (not a dust balance): any positive balance is now partially charged (partial_insufficient).
+            await db.collection("users").updateOne({ _id: uid }, { $set: { credits: 0 } });
 
             const insuff = await tryDeductCampaignCallCredits({
                 callUniqueId: insuffCallId,

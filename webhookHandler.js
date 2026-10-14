@@ -403,8 +403,12 @@ async function processOutboundHangupBilling({
         }
     }
 
+    // partial_insufficient = charged what was left (wallet → 0); still a recorded charge.
+    const partialBilled = creditResult.outcome === "partial_insufficient";
     const billed =
-        creditResult.outcome === "deducted" || creditResult.outcome === "already_billed";
+        creditResult.outcome === "deducted" ||
+        creditResult.outcome === "already_billed" ||
+        partialBilled;
     const mirror = {
         status: "completed",
         creditsDeducted: billed,
@@ -413,7 +417,8 @@ async function processOutboundHangupBilling({
     };
     if (billed && creditResult.cost != null) {
         mirror.creditsDeductedAmount = creditResult.cost;
-        mirror.creditDeductionError = null;
+        mirror.creditDeductionError = partialBilled ? "insufficient_credits_partial" : null;
+        if (partialBilled) mirror.creditsUnpaidAmount = creditResult.unpaid ?? null;
     } else if (!billed && creditResult.outcome !== "disabled") {
         mirror.creditDeductionError = creditResult.error || creditResult.outcome;
     }
@@ -597,7 +602,12 @@ async function processInboundHangupBilling({
         ...creditResult,
     });
 
-    if (creditResult.outcome === "deducted" || creditResult.outcome === "already_billed") {
+    const partialBilled = creditResult.outcome === "partial_insufficient";
+    if (
+        creditResult.outcome === "deducted" ||
+        creditResult.outcome === "already_billed" ||
+        partialBilled
+    ) {
         const syncParams = {
             callSid: anchor?.callSid,
             toPhone,
@@ -609,9 +619,10 @@ async function processInboundHangupBilling({
             configId: inboundConfigIdForCredit,
             creditFields: {
                 creditsDeducted: true,
-                creditDeductionError: null,
+                creditDeductionError: partialBilled ? "insufficient_credits_partial" : null,
                 status: "completed",
                 ...(creditResult.cost != null ? { creditsDeductedAmount: creditResult.cost } : {}),
+                ...(partialBilled ? { creditsUnpaidAmount: creditResult.unpaid ?? null } : {}),
             },
         };
         await syncInboundCompletionFields(syncParams);
@@ -645,7 +656,9 @@ async function finalizeInboundCallEnd(inboundAnchor, creditResult) {
     const notifyInbound = process.env.ONDIAL_INBOUND_NOTIFY_ENABLED === "1";
     const notifyOnMiss = process.env.ONDIAL_INBOUND_NOTIFY_ON_BILLING_MISS === "1";
     const billed =
-        creditResult?.outcome === "deducted" || creditResult?.outcome === "already_billed";
+        creditResult?.outcome === "deducted" ||
+        creditResult?.outcome === "already_billed" ||
+        creditResult?.outcome === "partial_insufficient";
     if (notifyInbound && notifyOnMiss && !billed) {
         await notifyOndialInboundWebhook(
             inboundAnchor.providerCallId || inboundAnchor.doc?.call_id

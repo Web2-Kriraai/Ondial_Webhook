@@ -21,17 +21,20 @@ async function sendWhatsappSessionReply(db, {
   campaignName,
   contactId,
   conversationWindowOpensUntil = null,
+  // Wallet that pays (org admin for org users). Defaults to the creator `user`.
+  billingUser = null,
 }) {
+  const payer = billingUser || user;
   if (conversationWindowOpensUntil && new Date(conversationWindowOpensUntil).getTime() <= Date.now()) {
     return { success: false, error: "conversation_window_closed" };
   }
 
   const usesPlatform = Boolean(profile?.usesPlatformAccount ?? true);
   const alreadyBilled =
-    user &&
-    (await hasBilledWhatsappSessionInWindow(db, { user, contactId, phone }));
+    payer &&
+    (await hasBilledWhatsappSessionInWindow(db, { user: payer, contactId, phone }));
   const cost = alreadyBilled ? 0 : await getWhatsappSendCost(db, usesPlatform, "session");
-  if (cost > 0 && (Number(user?.credits) || 0) < cost) {
+  if (cost > 0 && (Number(payer?.credits) || 0) < cost) {
     return { success: false, error: "insufficient_credits" };
   }
 
@@ -58,9 +61,9 @@ async function sendWhatsappSessionReply(db, {
   }
 
   const messageId = response.messageId || null;
-  if (user) {
+  if (payer) {
     await deductWhatsappCredits(db, {
-      user,
+      user: payer,
       cost,
       kind: "session",
       senderMode: usesPlatform ? "platform" : "own",

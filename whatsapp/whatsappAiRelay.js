@@ -14,6 +14,7 @@ const {
 } = require("./whatsappAiReplyResponse");
 const { applyWhatsappCallbackUpdate } = require("./applyWhatsappCallbackUpdate");
 const { previewText } = require("../lib/metaWhatsappLogSummary");
+const { resolveBillingUser } = require("../lib/resolveBillingUser");
 const {
   sendWhatsappFollowup,
   isWhatsappConversationWindowOpen,
@@ -550,6 +551,21 @@ async function relayInboundWhatsAppMessage(db, {
     });
   }
 
+  // Org users spend the org admin's wallet (resolveBillingUser); creator `user` keeps
+  // profile / templates / provider / session ownership.
+  let billingUser = user;
+  if (user && campaign) {
+    try {
+      const resolved = await resolveBillingUser(db, { campaign, explicitUserId: user._id });
+      if (resolved?.user) billingUser = resolved.user;
+    } catch (err) {
+      logger.warn("[WhatsApp] resolveBillingUser failed; billing creator wallet", {
+        campaignId: campaign?._id ? String(campaign._id) : null,
+        error: err?.message || String(err),
+      });
+    }
+  }
+
   const profile = findWhatsappProfile(user, campaign?.followupWhatsappProfileId);
   const session = await getOrCreateSession(db, {
     phone: phoneNorm,
@@ -610,7 +626,7 @@ async function relayInboundWhatsAppMessage(db, {
 
   const windowOpen = isConversationWindowOpenForReply(contact, timestamp);
   if (!windowOpen && user && campaign && contact) {
-    const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis });
+    const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis, billingUser });
     await recordTemplateReengagement(db, {
       contact,
       session: fresh || session,
@@ -698,6 +714,7 @@ async function relayInboundWhatsAppMessage(db, {
 
   const sendResult = await sendWhatsappSessionReply(db, {
     user,
+    billingUser,
     profile,
     phone: phoneNorm,
     text: replyText,
@@ -709,7 +726,7 @@ async function relayInboundWhatsAppMessage(db, {
 
   if (!sendResult.success) {
     if (sendResult.error === "conversation_window_closed" && user && campaign && contact) {
-      const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis });
+      const fallback = await sendWhatsappFollowup(db, { user, campaign, contact, analysis, billingUser });
       await recordTemplateReengagement(db, {
         contact,
         session: fresh || session,
