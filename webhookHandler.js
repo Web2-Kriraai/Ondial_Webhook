@@ -13,6 +13,7 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
+const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone } = require("./lib/acefoneWebhook");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
@@ -1717,6 +1718,19 @@ function deriveDurationSec(call, legs) {
 }
 
 function normalizeWebhookPayload(body) {
+    if (isAcefonePayload(body)) {
+        const n = normalizeAcefonePayload(body);
+        const summary = summarizeAcefone(body, n);
+        logger.info("[ACEFONE][NORMALIZED]", summary);
+        if (!n.call_unique_id) {
+            logger.warn(
+                "[ACEFONE][NO_IDENTITY] no ref_id / call_unique_id on callback — call cannot be matched to a contact or campaign. " +
+                    "Dial API must send ref_id = call_unique_id.",
+                summary
+            );
+        }
+        return n;
+    }
     if (!isNewProviderShape(body)) return body;
 
     const c = body.call || {};
@@ -1842,7 +1856,7 @@ async function handleWebhook(body, meta = {}) {
         return;
     }
     try {
-        const wasNewShape = isNewProviderShape(body);
+        const wasNewShape = isNewProviderShape(body) || isAcefonePayload(body);
         const normalized = wasNewShape ? normalizeWebhookPayload(body) : body;
         const payloadShape = normalized.event ? "event" : normalized.Call_UniqueId ? "summary" : "unknown";
 

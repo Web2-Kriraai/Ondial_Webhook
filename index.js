@@ -32,6 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
+const { isAcefonePayload, summarizeAcefone } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -2982,6 +2983,52 @@ app.post("/api/v1/webhooks/receiver", async (req, res) => {
             error: "webhook_queue_unavailable",
         });
     }
+});
+
+// ─── Acefone (India) webhook ingress ─────────────────────────────────────────
+// Configure in Acefone: API Connect > Webhook > Add Webhook, URL = <host>/api/v1/webhooks/acefone,
+// method POST (JSON or form) or GET, time zone/format as preferred. Payload has no event name;
+// lib/acefoneWebhook.js infers it. Auth is not offered by Acefone — keep the URL unguessable if needed.
+async function handleAcefoneWebhook(req, res) {
+    const body = { ...(req.query || {}), ...(req.body && typeof req.body === "object" ? req.body : {}) };
+    const reqMeta = {
+        method: req.method,
+        ip: req.ip,
+        content_type: req.headers["content-type"] || null,
+        key_count: Object.keys(body).length,
+    };
+    if (!isAcefonePayload(body)) {
+        // Raw body is logged here only (capped by logger) so a mis-configured webhook is easy to debug.
+        logger.warn("[ACEFONE][REJECTED] payload not recognised as Acefone", {
+            ...reqMeta,
+            keys: Object.keys(body).slice(0, 40),
+            raw: body,
+        });
+        return res.status(400).json({ received: false, error: "not_an_acefone_payload" });
+    }
+    logger.info("[ACEFONE][RECEIVED]", { ...reqMeta, ...summarizeAcefone(body) });
+    try {
+        const result = await enqueueWebhook(body, {
+            timestamp: req.headers["x-webhook-timestamp"] || null,
+            requestId: req.headers["x-request-id"] || null,
+        });
+        logger.info("[ACEFONE][QUEUED]", {
+            acefone_call_id: body.call_id || null,
+            ref_id: body.ref_id || null,
+            duplicate: result?.duplicate === true,
+        });
+        return res.status(200).json({ received: true, queued: true, duplicate: result?.duplicate === true });
+    } catch (err) {
+        logger.error("[ACEFONE][ENQUEUE_FAILED]", { error: err.message, acefone_call_id: body.call_id || null, ref_id: body.ref_id || null });
+        return res.status(503).json({ received: false, queued: false, error: "webhook_queue_unavailable" });
+    }
+}
+app.post("/api/v1/webhooks/acefone", handleAcefoneWebhook);
+app.get("/api/v1/webhooks/acefone", handleAcefoneWebhook);
+// Reachability check for Acefone / ops: GET <host>/api/v1/webhooks/acefone/ping → 200 ok.
+app.get("/api/v1/webhooks/acefone/ping", (req, res) => {
+    logger.info("[ACEFONE][PING]", { ip: req.ip });
+    res.status(200).json({ ok: true, receiver: "acefone" });
 });
 
 // Inbound: tie webhooks to Mongo by normalized call_id only (no contactprocessings lookup).
