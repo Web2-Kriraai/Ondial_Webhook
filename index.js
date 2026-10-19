@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -2567,9 +2567,21 @@ async function handlePoolConversation(req, res) {
     }
     const body = req.body || {};
     logIngressEvent(req, "[Pool] Conversation webhook payload", body);
-    const callKey = normalizeCallId(
-        body.call_id || body.call_unique_id || body.callUniqueId || body.Call_UniqueId
+    const rawCallKey = normalizeCallId(
+        body.call_id || body.call_unique_id || body.callUniqueId || body.Call_UniqueId || body.ref_id
     );
+    // Acefone: the AI side often holds the dashless id or Acefone's ref_id; CallLogs use the dashed id.
+    const resolvedKey = rawCallKey
+        ? await resolveConversationCallKey(rawCallKey, lookupMapping)
+        : { callKey: rawCallKey, changed: false, via: null };
+    const callKey = resolvedKey.callKey;
+    if (resolvedKey.changed) {
+        logger.info("[ACEFONE][CONVERSATION] call id resolved to our call_unique_id", {
+            received_call_id: rawCallKey,
+            call_unique_id: callKey,
+            via: resolvedKey.via,
+        });
+    }
     if (!callKey) {
         logger.warn("[Pool] Conversation missing call_id", {
             body_keys: Object.keys(body || {}),
@@ -2691,6 +2703,10 @@ async function handlePoolConversation(req, res) {
         { call_unique_id: callKey },
         { lead_id: callKey },
         { call_id: callKey },
+        // Also match docs stored under the id exactly as the caller sent it (safe no-op otherwise).
+        ...(resolvedKey.changed
+            ? [{ call_unique_id: rawCallKey }, { lead_id: rawCallKey }, { call_id: rawCallKey }]
+            : []),
     ];
 
     const db = getDb();
@@ -2717,6 +2733,11 @@ async function handlePoolConversation(req, res) {
     }
 
     if (!updated) {
+        logger.warn(
+            "[Pool] Conversation matched NO existing call log - creating a new one. " +
+                "If this is an Acefone call, the call id sent does not match the dialed call_unique_id.",
+            { call_id: callKey, received_call_id: rawCallKey, collection: primaryCollection }
+        );
         // lead_id / call_unique_id live in $set — do not also put them in $setOnInsert
         // (Mongo rejects the same path in both operators).
         await db.collection(primaryCollection).updateOne(
@@ -2897,7 +2918,7 @@ async function handleCommonConversation(req, res) {
     const explicit = String(rawBody.provider || rawBody.telephony_provider || "")
         .trim()
         .toLowerCase();
-    if (explicit === "pool" || explicit === "india") {
+    if (explicit === "pool" || explicit === "india" || explicit === "voicelink" || explicit === "acefone") {
         logger.info("[Conversation] Common route → pool (explicit provider)", {
             provider: explicit,
             call_id: pickDialerCallId(rawBody),

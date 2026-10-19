@@ -162,3 +162,22 @@ assert(!("ref_id" in buildAnsweredEventPayload({ call_unique_id: "u" }).payload.
 assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u", direction: "INBOUND" }).payload.call.direction, "inbound");
 assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u", direction: "sideways" }).error, "direction_invalid");
 console.log("acefone answered-api ref_id/direction tests passed");
+
+// ---- conversation call-id resolution (async) ----
+(async () => {
+    const { resolveConversationCallKey } = require("../lib/acefoneWebhook");
+    const aliases = { "01a15374-a3b8-72bf-9c48-a35ab2684089": { call_unique_id: "9b564a3a-3042-4447-8dc6-1eb44268c412" } };
+    const lookup = async (id) => aliases[id] || null;
+    let r = await resolveConversationCallKey("9b564a3a304244478dc61eb44268c412", lookup);
+    assert.deepStrictEqual(r, { callKey: "9b564a3a-3042-4447-8dc6-1eb44268c412", changed: true, via: "dashes_restored" });
+    r = await resolveConversationCallKey("01a15374-a3b8-72bf-9c48-a35ab2684089", lookup);
+    assert.strictEqual(r.callKey, "9b564a3a-3042-4447-8dc6-1eb44268c412");
+    assert.strictEqual(r.via, "ref_id_alias");
+    r = await resolveConversationCallKey("9b564a3a-3042-4447-8dc6-1eb44268c412", lookup); // already ours
+    assert.strictEqual(r.changed, false);
+    r = await resolveConversationCallKey("some-voicelink-id", lookup); // untouched
+    assert.deepStrictEqual(r, { callKey: "some-voicelink-id", changed: false, via: null });
+    r = await resolveConversationCallKey("9b564a3a304244478dc61eb44268c412", async () => { throw new Error("redis down"); });
+    assert.strictEqual(r.callKey, "9b564a3a-3042-4447-8dc6-1eb44268c412"); // lookup failure never blocks
+    console.log("acefone conversation call-id tests passed");
+})();
