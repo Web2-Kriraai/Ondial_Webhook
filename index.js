@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -3127,7 +3127,22 @@ app.post("/api/v1/webhooks/acefone/answered", async (req, res) => {
             });
         }
     }
-    const mappingFound = Boolean(mapping?.contact_id || cp.contact_id);
+    // Pin the identity in the payload so the handler never guesses from a phone-number mapping.
+    if (!cp.contact_id && mapping?.contact_id) cp.contact_id = String(mapping.contact_id);
+    if (cp.contact_id) {
+        const ownCampaign = await resolveCampaignFromContact(getDb, cp.contact_id);
+        cp.campaign_id = ownCampaign || cp.campaign_id || mapping?.campaign_id || undefined;
+        if (!cp.campaign_id) delete cp.campaign_id;
+    }
+    const mappingFound = Boolean(cp.contact_id);
+    if (!mappingFound) {
+        // No contact known: do NOT let the handler guess by phone (a stale mapping for the same number
+        // would attach this call to another campaign's contact and poison the call_unique_id mapping).
+        built.payload.call.to = null;
+        logger.warn("[ACEFONE][ANSWERED_API] contact unknown - phone fallback disabled so the call is not attached to a stale contact", {
+            call_unique_id: cp.call_unique_id,
+        });
+    }
     logger.info(
         mappingFound
             ? "[ACEFONE][ANSWERED_API] received"

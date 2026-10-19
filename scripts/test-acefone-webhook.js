@@ -213,3 +213,13 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(acefoneEventKey({ foo: 1 }), null);
     console.log("acefone duplicate-hangup event key tests passed");
 }
+
+(async () => {
+    const { resolveCampaignFromContact } = require("../lib/acefoneWebhook");
+    const fakeDb = (doc) => () => ({ collection: (n) => { assert.strictEqual(n, "contactprocessings"); return { findOne: async () => doc }; } });
+    assert.strictEqual(await resolveCampaignFromContact(fakeDb({ campaignId: "6ad5f02963029591472bb6fc" }), "6ad5f0e463029591472bb88e"), "6ad5f02963029591472bb6fc");
+    assert.strictEqual(await resolveCampaignFromContact(fakeDb(null), "6ad5f0e463029591472bb88e"), null);
+    assert.strictEqual(await resolveCampaignFromContact(fakeDb({ campaignId: "x" }), "not-an-objectid"), null);
+    assert.strictEqual(await resolveCampaignFromContact(() => { throw new Error("db down"); }, "6ad5f0e463029591472bb88e"), null);
+    console.log("acefone contact->campaign resolution tests passed");
+})();

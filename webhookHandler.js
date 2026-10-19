@@ -13,7 +13,7 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
-const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone, applyMappingIdentity, applyRefIdMappingFallback } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone, applyMappingIdentity, applyRefIdMappingFallback, resolveCampaignFromContact } = require("./lib/acefoneWebhook");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
@@ -1878,6 +1878,20 @@ async function handleWebhook(body, meta = {}) {
                         contact_id: normalized.contact_id,
                         campaign_id: normalized.campaign_id || null,
                     });
+                }
+            }
+            // The contact is the source of truth for the campaign (never a phone-number mapping).
+            if (normalized.contact_id) {
+                const ownCampaign = await resolveCampaignFromContact(getDb, normalized.contact_id);
+                if (ownCampaign && ownCampaign !== String(normalized.campaign_id || "")) {
+                    if (normalized.campaign_id) {
+                        logger.warn("[ACEFONE][IDENTITY] campaign corrected from the contact's own campaign", {
+                            contact_id: normalized.contact_id,
+                            was: normalized.campaign_id,
+                            now: ownCampaign,
+                        });
+                    }
+                    normalized.campaign_id = ownCampaign;
                 }
             }
             logger.info(
