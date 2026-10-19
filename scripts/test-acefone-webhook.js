@@ -117,3 +117,48 @@ const sm2 = summarizeAcefone(real2, n2);
 assert.strictEqual(sm2.identity_from, "custom_parameters");
 assert(!JSON.stringify(sm2).includes("[object Object]"));
 console.log("acefone custom_identifier object tests passed");
+
+// ---- AI-side "answered" API body -> call.answered event ----
+const { buildAnsweredEventPayload } = require("../lib/acefoneWebhook");
+let a = buildAnsweredEventPayload({
+    call_unique_id: "827c021fefd348db9de36ea68fd0f7c4", contact_id: "c1", campaign_id: "k1",
+    answered_at: "2026-10-19T13:39:02+05:30", to: "+919574661175",
+});
+assert(a.ok);
+assert.strictEqual(a.payload.event, "call.answered");
+assert.strictEqual(a.payload.call.customParameters.call_unique_id, "827c021f-efd3-48db-9de3-6ea68fd0f7c4");
+assert.strictEqual(a.payload.call.customParameters.campaign_id, "k1");
+assert.strictEqual(a.payload.call.answeredAt, "2026-10-19T08:09:02.000Z");
+assert.strictEqual(a.payload.call.direction, "outbound");
+assert(a.payload.call.id && a.payload.call.callStatus === "ANSWER");
+// shape is exactly what the handler's nested-provider path expects
+assert(typeof a.payload.event === "string" && a.payload.event.includes(".") && typeof a.payload.call === "object");
+assert.strictEqual(buildAnsweredEventPayload({ contact_id: "c1" }).error, "call_unique_id_required");
+// minimal body from the AI websocket start event: only call_unique_id (+ to / callSid)
+const min = buildAnsweredEventPayload({
+    call_unique_id: "9b564a3a304244478dc61eb44268c412", to: "+919574661175", provider_call_id: "SRVINF-BGN-SRV113-T9-1792401515.79528",
+});
+assert(min.ok);
+assert.strictEqual(min.payload.call.customParameters.call_unique_id, "9b564a3a-3042-4447-8dc6-1eb44268c412");
+assert(!("contact_id" in min.payload.call.customParameters));
+assert.strictEqual(min.payload.call.to, "+919574661175");
+assert.strictEqual(min.payload.call.id, "SRVINF-BGN-SRV113-T9-1792401515.79528");
+assert(buildAnsweredEventPayload({ call_unique_id: "u" }).ok);
+assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u", contact_id: "c", answered_at: "nope" }).error, "answered_at_invalid");
+assert(!("campaign_id" in buildAnsweredEventPayload({ call_unique_id: "u", contact_id: "c" }).payload.call.customParameters));
+console.log("acefone answered-api tests passed");
+
+// ---- ref_id + direction on the answered API ----
+const full = buildAnsweredEventPayload({
+    call_unique_id: "9b564a3a304244478dc61eb44268c412", to: "+919574661175",
+    provider_call_id: "SRVINF-BGN-SRV113-T9-1792401515.79528",
+    ref_id: "01a15374-a3b8-72bf-9c48-a35ab2684089", direction: "outbound",
+});
+assert(full.ok);
+assert.strictEqual(full.payload.call.ref_id, "01a15374-a3b8-72bf-9c48-a35ab2684089");
+assert.strictEqual(full.payload.call.direction, "outbound");
+assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u" }).payload.call.direction, "outbound"); // default
+assert(!("ref_id" in buildAnsweredEventPayload({ call_unique_id: "u" }).payload.call));
+assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u", direction: "INBOUND" }).payload.call.direction, "inbound");
+assert.strictEqual(buildAnsweredEventPayload({ call_unique_id: "u", direction: "sideways" }).error, "direction_invalid");
+console.log("acefone answered-api ref_id/direction tests passed");

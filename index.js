@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -3045,6 +3045,82 @@ async function handleAcefoneWebhook(req, res) {
 }
 app.post("/api/v1/webhooks/acefone", handleAcefoneWebhook);
 app.get("/api/v1/webhooks/acefone", handleAcefoneWebhook);
+// AI calling service -> "customer answered" for Acefone calls (Acefone itself does not send one for API calls).
+// Minimum body: { call_unique_id }  (contact/campaign are resolved from the worker's mapping).
+// Optional: answered_at, to, from, provider_call_id (callSid), ref_id, direction, contact_id, campaign_id.
+// If call_unique_id is missing but ref_id is sent, it is resolved from the worker's ref_id alias.
+// Optional shared secret: set ACEFONE_ANSWERED_SECRET and send it as `x-webhook-secret` (or Bearer).
+// With the env var unset the route is open, like the other ingress routes.
+function acefoneAnsweredSecretOk(req) {
+    const secret = String(process.env.ACEFONE_ANSWERED_SECRET || "");
+    if (!secret) return true;
+    const auth = String(req.headers.authorization || "");
+    const given = String(
+        req.headers["x-webhook-secret"] || (auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "")
+    );
+    const a = Buffer.from(given);
+    const b = Buffer.from(secret);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+app.post("/api/v1/webhooks/acefone/answered", async (req, res) => {
+    if (!acefoneAnsweredSecretOk(req)) {
+        logger.warn("[ACEFONE][ANSWERED_API] rejected: bad or missing secret", { ip: req.ip });
+        return res.status(401).json({ received: false, error: "unauthorized" });
+    }
+    const reqBody = { ...(req.body && typeof req.body === "object" ? req.body : {}) };
+    const hasCallUniqueId = Boolean(String(reqBody.call_unique_id || reqBody.callUniqueId || "").trim());
+    const refIdIn = String(reqBody.ref_id || reqBody.refId || "").trim();
+    if (!hasCallUniqueId && refIdIn) {
+        try {
+            const alias = await lookupMapping(refIdIn);
+            if (alias?.call_unique_id) reqBody.call_unique_id = alias.call_unique_id;
+        } catch (err) {
+            logger.warn("[ACEFONE][ANSWERED_API] ref_id alias lookup failed", { error: err.message });
+        }
+    }
+    const built = buildAnsweredEventPayload(reqBody);
+    if (!built.ok) {
+        logger.warn("[ACEFONE][ANSWERED_API] rejected", { error: built.error, ip: req.ip, keys: Object.keys(req.body || {}) });
+        return res.status(400).json({ received: false, error: built.error });
+    }
+    const cp = built.payload.call.customParameters;
+    let mapping = null;
+    try {
+        mapping = await lookupMapping(cp.call_unique_id);
+    } catch (err) {
+        logger.warn("[ACEFONE][ANSWERED_API] mapping lookup failed", { error: err.message });
+    }
+    const mappingFound = Boolean(mapping?.contact_id || cp.contact_id);
+    logger.info(
+        mappingFound
+            ? "[ACEFONE][ANSWERED_API] received"
+            : "[ACEFONE][ANSWERED_API] received - NO worker mapping or contact_id for this call_unique_id (will fall back to phone match)",
+        {
+            call_unique_id: cp.call_unique_id,
+            contact_id: cp.contact_id || mapping?.contact_id || null,
+            campaign_id: cp.campaign_id || mapping?.campaign_id || null,
+            to_present: Boolean(built.payload.call.to),
+            direction: built.payload.call.direction,
+            ref_id: built.payload.call.ref_id || null,
+            resolved_from: hasCallUniqueId ? "call_unique_id" : "ref_id",
+            answeredAt: built.payload.call.answeredAt,
+        }
+    );
+    try {
+        const result = await enqueueWebhook(built.payload, { requestId: req.headers["x-request-id"] || null });
+        return res.status(200).json({
+            received: true,
+            queued: true,
+            duplicate: result?.duplicate === true,
+            mapping_found: mappingFound,
+        });
+    } catch (err) {
+        logger.error("[ACEFONE][ANSWERED_API] enqueue failed", { error: err.message, call_unique_id: cp.call_unique_id });
+        return res.status(503).json({ received: false, queued: false, error: "webhook_queue_unavailable" });
+    }
+});
+
 // Reachability check for Acefone / ops: GET <host>/api/v1/webhooks/acefone/ping → 200 ok.
 app.get("/api/v1/webhooks/acefone/ping", (req, res) => {
     logger.info("[ACEFONE][PING]", { ip: req.ip });
