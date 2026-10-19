@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -3111,6 +3111,19 @@ app.post("/api/v1/webhooks/acefone/answered", async (req, res) => {
         mapping = await lookupMapping(cp.call_unique_id);
     } catch (err) {
         logger.warn("[ACEFONE][ANSWERED_API] mapping lookup failed", { error: err.message });
+    }
+    // No mapping under our id: the test-call route registers it under the dial API id (= Acefone ref_id).
+    if (!mapping?.contact_id && !cp.contact_id && refIdIn) {
+        const holder = { contact_id: null, campaign_id: cp.campaign_id || null };
+        const fb = await applyRefIdMappingFallback(holder, [refIdIn], lookupMapping);
+        if (fb.applied) {
+            cp.contact_id = holder.contact_id;
+            if (holder.campaign_id) cp.campaign_id = holder.campaign_id;
+            logger.info("[ACEFONE][ANSWERED_API] contact/campaign recovered from mapping stored under ref_id", {
+                call_unique_id: cp.call_unique_id,
+                contact_id: cp.contact_id,
+            });
+        }
     }
     const mappingFound = Boolean(mapping?.contact_id || cp.contact_id);
     logger.info(

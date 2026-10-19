@@ -13,7 +13,7 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
-const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone, applyMappingIdentity } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone, applyMappingIdentity, applyRefIdMappingFallback } = require("./lib/acefoneWebhook");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
@@ -1861,7 +1861,25 @@ async function handleWebhook(body, meta = {}) {
         if (isAcefonePayload(body)) {
             // ref_id may be the dial API's call id: resolve it to our call_unique_id via the worker's alias.
             const alias = await lookupMapping(normalized.call_unique_id || normalized.call_id);
-            const { applied } = applyMappingIdentity(normalized, alias);
+            let { applied } = applyMappingIdentity(normalized, alias);
+            if (!applied && !alias?.contact_id) {
+                // No mapping under our id: the dial path may have registered it under Acefone's ref_id.
+                const rawRef = normalized._raw ? String(normalized._raw.ref_id || "").trim() : "";
+                const fb = await applyRefIdMappingFallback(
+                    normalized,
+                    [rawRef, normalized.provider_call_id],
+                    lookupMapping
+                );
+                if (fb.applied) {
+                    applied = true;
+                    logger.info("[ACEFONE][IDENTITY] contact/campaign recovered from mapping stored under ref_id", {
+                        via: fb.via,
+                        call_unique_id: normalized.call_unique_id,
+                        contact_id: normalized.contact_id,
+                        campaign_id: normalized.campaign_id || null,
+                    });
+                }
+            }
             logger.info(
                 applied
                     ? "[ACEFONE][IDENTITY] resolved via worker mapping (provider call id -> call_unique_id)"

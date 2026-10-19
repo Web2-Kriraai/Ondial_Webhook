@@ -181,3 +181,21 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(r.callKey, "9b564a3a-3042-4447-8dc6-1eb44268c412"); // lookup failure never blocks
     console.log("acefone conversation call-id tests passed");
 })();
+
+(async () => {
+    const { applyRefIdMappingFallback } = require("../lib/acefoneWebhook");
+    const store = { "01a1539a-09f8-7032-a67c-254dca0c82cb": { contact_id: "c77", campaign_id: "k77" } };
+    const lookup = async (id) => store[id] || null;
+    let n = { call_unique_id: "e675cb59-96e3-44d4-ba94-b634d450afe1", contact_id: null, campaign_id: null };
+    let r = await applyRefIdMappingFallback(n, ["01a1539a-09f8-7032-a67c-254dca0c82cb", "SRVINF-x"], lookup);
+    assert.strictEqual(r.applied, true);
+    assert.strictEqual(n.contact_id, "c77");
+    assert.strictEqual(n.campaign_id, "k77");
+    assert.strictEqual(n.call_unique_id, "e675cb59-96e3-44d4-ba94-b634d450afe1"); // our id unchanged
+    n = { contact_id: "already" };
+    assert.strictEqual((await applyRefIdMappingFallback(n, ["01a1539a-09f8-7032-a67c-254dca0c82cb"], lookup)).applied, false);
+    n = { contact_id: null };
+    assert.strictEqual((await applyRefIdMappingFallback(n, ["nope", ""], lookup)).applied, false);
+    assert.strictEqual((await applyRefIdMappingFallback({ contact_id: null }, ["x"], async () => { throw new Error("redis"); })).applied, false);
+    console.log("acefone ref_id mapping fallback tests passed");
+})();
