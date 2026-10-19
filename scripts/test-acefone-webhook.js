@@ -60,3 +60,35 @@ assert.strictEqual(sm.event, "call_hangup");
 assert(!JSON.stringify(sm).includes("9800000000")); // phone masked
 assert.strictEqual(summarizeAcefone({ ...hangup, ref_id: undefined }, normalizeAcefonePayload({ ...hangup, ref_id: undefined })).identity_from, "none");
 console.log("acefone log summary tests passed");
+
+// ---- real payload shape seen on dev (trailing-space key, Acefone's own campaign_id, ref_id = dial API call id) ----
+const { applyMappingIdentity } = require("../lib/acefoneWebhook");
+const real = {
+    uuid: "6ad5c2a7854f3", call_to_number: "916353125194", caller_id_number: "918065936453",
+    start_stamp: "2026-10-19 12:41:35", answer_stamp: "", end_stamp: "2026-10-19 12:41:41",
+    billsec: "0", duration: "6", direction: "clicktocall", call_status: "missed",
+    answered_agent_number: "", call_id: "SRVINF-BGN-SRV116-T5-1792393895.49308",
+    billing_circle: "India", "customer_no_with_prefix ": "+916353125194",
+    campaign_name: "AcefoneDialer", campaign_id: "777", hangup_cause_key: "NO_ANSWER",
+    ref_id: "01a15300-5e80-7383-be69-b42ed217532e", custom_identifier: "",
+};
+assert(isAcefonePayload(real));
+let r = normalizeAcefonePayload(real);
+assert.strictEqual(r.event, "call_hangup");
+assert.strictEqual(r.campaign_id, null, "Acefone's own campaign_id must not become ours");
+assert.strictEqual(r.to, "+916353125194");
+assert.strictEqual(r.callStatus, "NO ANSWER");
+// worker alias maps the dial API id -> our call_unique_id/contact/campaign
+const res = applyMappingIdentity(r, { call_unique_id: "ef2fa3f5-59e8-4ef0-a813-e86ea45da035", contact_id: "c1", campaign_id: "k1" });
+assert(res.applied);
+assert.strictEqual(r.call_unique_id, "ef2fa3f5-59e8-4ef0-a813-e86ea45da035");
+assert.strictEqual(r.call_id, "ef2fa3f5-59e8-4ef0-a813-e86ea45da035");
+assert.strictEqual(r.contact_id, "c1");
+assert.strictEqual(r.campaign_id, "k1");
+assert.strictEqual(r.provider_call_id, "SRVINF-BGN-SRV116-T5-1792393895.49308"); // Acefone call id kept
+assert(!applyMappingIdentity(normalizeAcefonePayload(real), null).applied);
+// JSON in custom_identifier carries our ids
+r = normalizeAcefonePayload({ ...real, ref_id: undefined, custom_identifier: '{"call_unique_id":"cu9","contact_id":"c9","campaign_id":"k9"}' });
+assert.strictEqual(r.call_unique_id, "cu9");
+assert.strictEqual(r.campaign_id, "k9");
+console.log("acefone real-payload + alias tests passed");

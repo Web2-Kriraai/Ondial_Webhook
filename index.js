@@ -591,6 +591,26 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         is_test_call: body?.is_test_call === true || body?.is_test_call === 'true',
     });
 
+    // Acefone: the dial API may use ITS call id as ref_id. Alias that id to our call_unique_id so the
+    // callback resolves to the right contact/campaign/CallLog instead of a phone-number guess.
+    const providerCallKey = normalizeCallId(body.provider_call_id);
+    if (providerCallKey && providerCallKey !== callKey) {
+        await registerCallMapping({
+            call_id: providerCallKey,
+            call_unique_id: callKey,
+            lead_id: callKey,
+            campaign_id: campaignId,
+            contact_id: contactId,
+            phone: phone || "",
+            collectionName,
+            is_test_call: body.is_test_call === true || body.is_test_call === "true",
+        });
+        logger.info("[OutboundMapping] Stored provider-call-id alias", {
+            provider_call_id: providerCallKey,
+            call_unique_id: callKey,
+        });
+    }
+
     logger.info("[OutboundMapping] Stored Redis mapping", {
         call_id: callKey,
         contact_id: contactId,

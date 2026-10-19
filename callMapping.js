@@ -47,6 +47,7 @@ async function registerCallMapping({
     phone,
     collectionName,
     is_test_call,
+    call_unique_id,
 }) {
     const key = normalizeCallId(call_id);
     if (!key) {
@@ -60,6 +61,7 @@ async function registerCallMapping({
         contact_id: String(contact_id || ""),
         phone: normalizePhone(phone) || "",
         is_test_call: is_test_call === true,
+        ...(call_unique_id ? { call_unique_id: String(call_unique_id) } : {}),
         ...(collectionName ? { collectionName: String(collectionName) } : {}),
         storedAt: Date.now()
     };

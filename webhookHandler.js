@@ -13,7 +13,7 @@ const {
     hasAnsweredFlag,
 } = require("./callMapping");
 const { extractCustomParameters, pickNonEmpty } = require("./lib/customParameters");
-const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, normalizeAcefonePayload, summarizeAcefone, applyMappingIdentity } = require("./lib/acefoneWebhook");
 const { inferIsTestCallFromWebhookBody } = require("./lib/inferTestCall");
 const { resolveCampaignIdFromContact, isMongoObjectIdString } = require("./lib/resolveCampaignId");
 const { resolveStoredOutboundIdentity } = require("./lib/resolveStoredOutboundIdentity");
@@ -1858,6 +1858,22 @@ async function handleWebhook(body, meta = {}) {
     try {
         const wasNewShape = isNewProviderShape(body) || isAcefonePayload(body);
         const normalized = wasNewShape ? normalizeWebhookPayload(body) : body;
+        if (isAcefonePayload(body)) {
+            // ref_id may be the dial API's call id: resolve it to our call_unique_id via the worker's alias.
+            const alias = await lookupMapping(normalized.call_unique_id || normalized.call_id);
+            const { applied } = applyMappingIdentity(normalized, alias);
+            logger.info(
+                applied
+                    ? "[ACEFONE][IDENTITY] resolved via worker mapping (provider call id -> call_unique_id)"
+                    : "[ACEFONE][IDENTITY] no worker mapping for this id - using payload ids / phone fallback",
+                {
+                    provider_call_id: normalized.provider_call_id || null,
+                    call_unique_id: normalized.call_unique_id || null,
+                    contact_id: normalized.contact_id || null,
+                    campaign_id: normalized.campaign_id || null,
+                }
+            );
+        }
         const payloadShape = normalized.event ? "event" : normalized.Call_UniqueId ? "summary" : "unknown";
 
         console.log("[Webhook] received payload", {
