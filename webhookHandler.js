@@ -1883,7 +1883,9 @@ async function handleWebhook(body, meta = {}) {
             logger.info(
                 applied
                     ? "[ACEFONE][IDENTITY] resolved via worker mapping (provider call id -> call_unique_id)"
-                    : "[ACEFONE][IDENTITY] no worker mapping for this id - using payload ids / phone fallback",
+                    : alias?.contact_id
+                      ? "[ACEFONE][IDENTITY] worker mapping found under call_unique_id (direct)"
+                      : "[ACEFONE][IDENTITY] no worker mapping for this id - using payload ids / phone fallback",
                 {
                     provider_call_id: normalized.provider_call_id || null,
                     call_unique_id: normalized.call_unique_id || null,

@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -3050,6 +3050,8 @@ async function handleAcefoneWebhook(req, res) {
     logger.info("[ACEFONE][RECEIVED]", { ...reqMeta, ...summarizeAcefone(body) });
     try {
         const result = await enqueueWebhook(body, {
+            // Same call + same event = same eventId, so a duplicate delivery is dropped, not re-billed.
+            eventId: acefoneEventKey(body),
             timestamp: req.headers["x-webhook-timestamp"] || null,
             requestId: req.headers["x-request-id"] || null,
         });

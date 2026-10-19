@@ -199,3 +199,17 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual((await applyRefIdMappingFallback({ contact_id: null }, ["x"], async () => { throw new Error("redis"); })).applied, false);
     console.log("acefone ref_id mapping fallback tests passed");
 })();
+
+// ---- duplicate hangup delivery shares one event key ----
+{
+    const { acefoneEventKey } = require("../lib/acefoneWebhook");
+    const first = { ...real2, call_id: "SRVINF-BGN-SRV116-T5-1792404355.92119" };
+    const second = { ...first, recording_name: "rec-123.mp3" }; // 2nd copy adds recording_name
+    assert.strictEqual(acefoneEventKey(first), acefoneEventKey(second));
+    assert.strictEqual(acefoneEventKey(first), "acefone:SRVINF-BGN-SRV116-T5-1792404355.92119:call_hangup");
+    // a different event for the same call must NOT collide
+    const ans = acefoneEventKey({ uuid: "u", call_id: "SRVINF-BGN-SRV116-T5-1792404355.92119", call_to_number: "1", caller_id_number: "2", billing_circle: "x", call_status: "answered by customer" });
+    assert.notStrictEqual(ans, acefoneEventKey(first));
+    assert.strictEqual(acefoneEventKey({ foo: 1 }), null);
+    console.log("acefone duplicate-hangup event key tests passed");
+}
