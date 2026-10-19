@@ -92,3 +92,28 @@ r = normalizeAcefonePayload({ ...real, ref_id: undefined, custom_identifier: '{"
 assert.strictEqual(r.call_unique_id, "cu9");
 assert.strictEqual(r.campaign_id, "k9");
 console.log("acefone real-payload + alias tests passed");
+
+// ---- real Acefone log payload: custom_identifier is an OBJECT, billing_circle an object, hex id without dashes ----
+const real2 = {
+    uuid: "6ad5c9c23cc7c", call_to_number: "916353125194", caller_id_number: "8065936453",
+    start_stamp: "2026-10-19 13:11:54", answer_stamp: "", end_stamp: "2026-10-19 13:11:57", billsec: "0",
+    direction: "clicktocall", duration: "0", answered_agent_number: "", call_flow: [], recording_url: "",
+    call_status: "missed", call_id: "SRVINF-BGN-SRV116-T5-1792395714.56376",
+    billing_circle: { operator: "Reliance JIO", circle: "Gujarat" },
+    "customer_no_with_prefix ": "+916353125194", campaign_name: "", campaign_id: "",
+    hangup_cause_key: "INCOMPATIBLE_DESTINATION", hangup_cause_code: "88",
+    ref_id: "01a1531c-1ecf-7271-9d13-3c2716d47a88",
+    custom_identifier: { call_unique_id: "f235fad8991b4294a3496c814449a00e", contact_id: "6ad5c286d9242a96f3dea380" },
+};
+assert(isAcefonePayload(real2));
+const n2 = normalizeAcefonePayload(real2);
+assert.strictEqual(n2.call_unique_id, "f235fad8-991b-4294-a349-6c814449a00e");
+assert.strictEqual(n2.call_id, "f235fad8-991b-4294-a349-6c814449a00e");
+assert.strictEqual(n2.contact_id, "6ad5c286d9242a96f3dea380");
+assert.strictEqual(n2.campaign_id, null);
+assert.strictEqual(n2.event, "call_hangup");
+assert.strictEqual(n2.callStatus, "FAILED");
+const sm2 = summarizeAcefone(real2, n2);
+assert.strictEqual(sm2.identity_from, "custom_parameters");
+assert(!JSON.stringify(sm2).includes("[object Object]"));
+console.log("acefone custom_identifier object tests passed");
