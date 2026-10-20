@@ -677,6 +677,36 @@ async function finalizeInboundCallEnd(inboundAnchor, creditResult) {
             void triggerInboundCallAnalysis(String(analysisKey), {
                 isTestCall: inboundAnchor.doc?.isTestCall === true,
                 deferIfNoTurns: true,
+            }).then((res) => {
+                logger.info("[InboundAnalysis] Trigger after hangup finalize result", {
+                    callId: analysisKey,
+                    ...res,
+                });
+                // Transcript usually lands via Ondial call/end a moment after hangup — retry.
+                if (res?.deferred) {
+                    for (const delayMs of [6000, 20000, 60000]) {
+                        setTimeout(() => {
+                            triggerInboundCallAnalysis(String(analysisKey), {
+                                isTestCall: inboundAnchor.doc?.isTestCall === true,
+                                deferIfNoTurns: true,
+                            })
+                                .then((r) =>
+                                    logger.info("[InboundAnalysis] Deferred retry result", {
+                                        callId: analysisKey,
+                                        delayMs,
+                                        ...r,
+                                    })
+                                )
+                                .catch((err) =>
+                                    logger.warn("[InboundAnalysis] Deferred retry failed", {
+                                        callId: analysisKey,
+                                        delayMs,
+                                        error: err?.message || err,
+                                    })
+                                );
+                        }, delayMs);
+                    }
+                }
             }).catch((err) => {
                 logger.warn("[InboundAnalysis] Trigger after hangup finalize failed", {
                     callId: analysisKey,
