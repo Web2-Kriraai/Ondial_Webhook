@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact, buildTransferEventPayload } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -3086,91 +3086,145 @@ function acefoneAnsweredSecretOk(req) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-app.post("/api/v1/webhooks/acefone/answered", async (req, res) => {
-    if (!acefoneAnsweredSecretOk(req)) {
-        logger.warn("[ACEFONE][ANSWERED_API] rejected: bad or missing secret", { ip: req.ip });
-        return res.status(401).json({ received: false, error: "unauthorized" });
-    }
-    const reqBody = { ...(req.body && typeof req.body === "object" ? req.body : {}) };
-    const hasCallUniqueId = Boolean(String(reqBody.call_unique_id || reqBody.callUniqueId || "").trim());
-    const refIdIn = String(reqBody.ref_id || reqBody.refId || "").trim();
-    if (!hasCallUniqueId && refIdIn) {
-        try {
-            const alias = await lookupMapping(refIdIn);
-            if (alias?.call_unique_id) reqBody.call_unique_id = alias.call_unique_id;
-        } catch (err) {
-            logger.warn("[ACEFONE][ANSWERED_API] ref_id alias lookup failed", { error: err.message });
+// Shared pipeline for events the AI calling service reports for Acefone calls (answered, transfer).
+// Steps: secret check -> resolve call_unique_id (ref_id alias fallback) -> build the call.* event ->
+// find the worker mapping -> pin contact + campaign (campaign comes from the contact) -> enqueue.
+function makeAcefoneAiEventRoute({ tag, build, describe, eventId }) {
+    return async (req, res) => {
+        if (!acefoneAnsweredSecretOk(req)) {
+            logger.warn(`[ACEFONE][${tag}] rejected: bad or missing secret`, { ip: req.ip });
+            return res.status(401).json({ received: false, error: "unauthorized" });
         }
-    }
-    const built = buildAnsweredEventPayload(reqBody);
-    if (!built.ok) {
-        logger.warn("[ACEFONE][ANSWERED_API] rejected", { error: built.error, ip: req.ip, keys: Object.keys(req.body || {}) });
-        return res.status(400).json({ received: false, error: built.error });
-    }
-    const cp = built.payload.call.customParameters;
-    let mapping = null;
-    try {
-        mapping = await lookupMapping(cp.call_unique_id);
-    } catch (err) {
-        logger.warn("[ACEFONE][ANSWERED_API] mapping lookup failed", { error: err.message });
-    }
-    // No mapping under our id: the test-call route registers it under the dial API id (= Acefone ref_id).
-    if (!mapping?.contact_id && !cp.contact_id && refIdIn) {
-        const holder = { contact_id: null, campaign_id: cp.campaign_id || null };
-        const fb = await applyRefIdMappingFallback(holder, [refIdIn], lookupMapping);
-        if (fb.applied) {
-            cp.contact_id = holder.contact_id;
-            if (holder.campaign_id) cp.campaign_id = holder.campaign_id;
-            logger.info("[ACEFONE][ANSWERED_API] contact/campaign recovered from mapping stored under ref_id", {
+        const reqBody = { ...(req.body && typeof req.body === "object" ? req.body : {}) };
+        const hasCallUniqueId = Boolean(String(reqBody.call_unique_id || reqBody.callUniqueId || "").trim());
+        const refIdIn = String(reqBody.ref_id || reqBody.refId || "").trim();
+        if (!hasCallUniqueId && refIdIn) {
+            try {
+                const alias = await lookupMapping(refIdIn);
+                if (alias?.call_unique_id) reqBody.call_unique_id = alias.call_unique_id;
+            } catch (err) {
+                logger.warn(`[ACEFONE][${tag}] ref_id alias lookup failed`, { error: err.message });
+            }
+        }
+        const built = build(reqBody);
+        if (!built.ok) {
+            logger.warn(`[ACEFONE][${tag}] rejected`, { error: built.error, ip: req.ip, keys: Object.keys(req.body || {}) });
+            return res.status(400).json({ received: false, error: built.error });
+        }
+        if (built.ignored) {
+            // e.g. transfer status failed/skipped: acknowledge, log, but change nothing on the call.
+            logger.info(`[ACEFONE][${tag}] acknowledged, no change (status=${built.status})`, {
+                call_unique_id: built.callUniqueId,
+                status: built.status,
+                reason: built.reason,
+                provider_message: built.providerMessage,
+                http_status: built.httpStatus,
+            });
+            return res.status(200).json({ received: true, queued: false, ignored: true, status: built.status });
+        }
+        const cp = built.payload.call.customParameters;
+        let mapping = null;
+        try {
+            mapping = await lookupMapping(cp.call_unique_id);
+        } catch (err) {
+            logger.warn(`[ACEFONE][${tag}] mapping lookup failed`, { error: err.message });
+        }
+        // No mapping under our id: the test-call route registers it under the dial API id (= Acefone ref_id).
+        if (!mapping?.contact_id && !cp.contact_id && refIdIn) {
+            const holder = { contact_id: null, campaign_id: cp.campaign_id || null };
+            const fb = await applyRefIdMappingFallback(holder, [refIdIn], lookupMapping);
+            if (fb.applied) {
+                cp.contact_id = holder.contact_id;
+                if (holder.campaign_id) cp.campaign_id = holder.campaign_id;
+                logger.info(`[ACEFONE][${tag}] contact/campaign recovered from mapping stored under ref_id`, {
+                    call_unique_id: cp.call_unique_id,
+                    contact_id: cp.contact_id,
+                });
+            }
+        }
+        // Pin the identity in the payload so the handler never guesses from a phone-number mapping.
+        if (!cp.contact_id && mapping?.contact_id) cp.contact_id = String(mapping.contact_id);
+        if (cp.contact_id) {
+            const ownCampaign = await resolveCampaignFromContact(getDb, cp.contact_id);
+            cp.campaign_id = ownCampaign || cp.campaign_id || mapping?.campaign_id || undefined;
+            if (!cp.campaign_id) delete cp.campaign_id;
+        }
+        const mappingFound = Boolean(cp.contact_id);
+        if (!mappingFound) {
+            // No contact known: do NOT let the handler guess by phone (a stale mapping for the same number
+            // would attach this call to another campaign's contact and poison the call_unique_id mapping).
+            built.payload.call.to = null;
+            logger.warn(`[ACEFONE][${tag}] contact unknown - phone fallback disabled so the call is not attached to a stale contact`, {
                 call_unique_id: cp.call_unique_id,
-                contact_id: cp.contact_id,
             });
         }
-    }
-    // Pin the identity in the payload so the handler never guesses from a phone-number mapping.
-    if (!cp.contact_id && mapping?.contact_id) cp.contact_id = String(mapping.contact_id);
-    if (cp.contact_id) {
-        const ownCampaign = await resolveCampaignFromContact(getDb, cp.contact_id);
-        cp.campaign_id = ownCampaign || cp.campaign_id || mapping?.campaign_id || undefined;
-        if (!cp.campaign_id) delete cp.campaign_id;
-    }
-    const mappingFound = Boolean(cp.contact_id);
-    if (!mappingFound) {
-        // No contact known: do NOT let the handler guess by phone (a stale mapping for the same number
-        // would attach this call to another campaign's contact and poison the call_unique_id mapping).
-        built.payload.call.to = null;
-        logger.warn("[ACEFONE][ANSWERED_API] contact unknown - phone fallback disabled so the call is not attached to a stale contact", {
-            call_unique_id: cp.call_unique_id,
-        });
-    }
-    logger.info(
-        mappingFound
-            ? "[ACEFONE][ANSWERED_API] received"
-            : "[ACEFONE][ANSWERED_API] received - NO worker mapping or contact_id for this call_unique_id (will fall back to phone match)",
-        {
-            call_unique_id: cp.call_unique_id,
-            contact_id: cp.contact_id || mapping?.contact_id || null,
-            campaign_id: cp.campaign_id || mapping?.campaign_id || null,
-            to_present: Boolean(built.payload.call.to),
-            direction: built.payload.call.direction,
-            ref_id: built.payload.call.ref_id || null,
-            resolved_from: hasCallUniqueId ? "call_unique_id" : "ref_id",
-            answeredAt: built.payload.call.answeredAt,
+        logger.info(
+            mappingFound
+                ? `[ACEFONE][${tag}] received`
+                : `[ACEFONE][${tag}] received - NO worker mapping or contact_id for this call_unique_id (phone fallback disabled)`,
+            {
+                call_unique_id: cp.call_unique_id,
+                contact_id: cp.contact_id || mapping?.contact_id || null,
+                campaign_id: cp.campaign_id || mapping?.campaign_id || null,
+                to_present: Boolean(built.payload.call.to),
+                direction: built.payload.call.direction,
+                ref_id: built.payload.call.ref_id || null,
+                resolved_from: hasCallUniqueId ? "call_unique_id" : "ref_id",
+                ...(describe ? describe(built.payload) : {}),
+            }
+        );
+        try {
+            const meta = { requestId: req.headers["x-request-id"] || null };
+            const id = eventId ? eventId(built.payload) : null;
+            if (id) meta.eventId = id;
+            const result = await enqueueWebhook(built.payload, meta);
+            return res.status(200).json({
+                received: true,
+                queued: true,
+                duplicate: result?.duplicate === true,
+                mapping_found: mappingFound,
+            });
+        } catch (err) {
+            logger.error(`[ACEFONE][${tag}] enqueue failed`, { error: err.message, call_unique_id: cp.call_unique_id });
+            return res.status(503).json({ received: false, queued: false, error: "webhook_queue_unavailable" });
         }
-    );
-    try {
-        const result = await enqueueWebhook(built.payload, { requestId: req.headers["x-request-id"] || null });
-        return res.status(200).json({
-            received: true,
-            queued: true,
-            duplicate: result?.duplicate === true,
-            mapping_found: mappingFound,
-        });
-    } catch (err) {
-        logger.error("[ACEFONE][ANSWERED_API] enqueue failed", { error: err.message, call_unique_id: cp.call_unique_id });
-        return res.status(503).json({ received: false, queued: false, error: "webhook_queue_unavailable" });
-    }
-});
+    };
+}
+
+function maskTail(v) {
+    const d = String(v || "").replace(/\D/g, "");
+    return d.length > 4 ? `${"*".repeat(Math.min(d.length - 4, 8))}${d.slice(-4)}` : d || null;
+}
+
+app.post(
+    "/api/v1/webhooks/acefone/answered",
+    makeAcefoneAiEventRoute({
+        tag: "ANSWERED_API",
+        build: buildAnsweredEventPayload,
+        describe: (p) => ({ answeredAt: p.call.answeredAt }),
+    })
+);
+
+// AI calling service -> "the call was transferred to a human" (Acefone has no transfer event).
+// Minimum body: { call_unique_id, transfer_target }.
+// Optional: transfer_at, reason, to, from, provider_call_id, ref_id, direction, contact_id, campaign_id.
+// Same optional ACEFONE_ANSWERED_SECRET header as the answered endpoint. Does not end or bill the call.
+app.post(
+    "/api/v1/webhooks/acefone/transfer",
+    makeAcefoneAiEventRoute({
+        tag: "TRANSFER_API",
+        build: buildTransferEventPayload,
+        describe: (p) => ({
+            transfer_target: maskTail(p.call.transferTarget),
+            transferAt: p.call.transferAt,
+            reason: p.call.transferReason || null,
+            provider_message: p.call.transferProviderMessage || null,
+        }),
+        // One transfer per call and target: a retried or duplicated post is dropped, not re-applied.
+        eventId: (p) =>
+            `acefone-ai:transfer:${p.call.customParameters.call_unique_id}:${String(p.call.transferTarget).replace(/\D/g, "")}`,
+    })
+);
 
 // Reachability check for Acefone / ops: GET <host>/api/v1/webhooks/acefone/ping → 200 ok.
 app.get("/api/v1/webhooks/acefone/ping", (req, res) => {
