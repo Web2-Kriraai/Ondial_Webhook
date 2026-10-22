@@ -295,3 +295,37 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", status: "accepted" }).error, "transfer_target_required");
     console.log("acefone transfer-api AI-format tests passed");
 }
+
+// ---- talk time recovered from answer/end stamps when Acefone reports billsec 0 ----
+{
+    const dropped = {
+        uuid: "u", call_id: "SRVINF-1", call_to_number: "916352617754", caller_id_number: "8065990635",
+        billing_circle: "x", call_status: "answered", direction: "clicktocall",
+        start_stamp: "2026-10-22 16:22:40", answer_stamp: "2026-10-22 16:22:58", end_stamp: "2026-10-22 16:23:43",
+        billsec: "0", hangup_cause_key: "NETWORK_OUT_OF_ORDER", reason_key: "Calls dropped",
+        ref_id: "r", custom_identifier: { call_unique_id: "cbb09ee7f1b64e18af5a68ec25dcade8", contact_id: "c1" },
+    };
+    let d = normalizeAcefonePayload(dropped);
+    assert.strictEqual(d.duration, 45);
+    assert.strictEqual(d.durationSource, "answer_end_stamps");
+    assert.strictEqual(d.callStatus, "ANSWER");
+    // the zone does not matter: both stamps share it
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58Z", end_stamp: "2026-10-22T10:53:43Z" });
+    assert.strictEqual(d.duration, 45);
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "1792666378", end_stamp: "1792666423" }); // epoch seconds
+    assert.strictEqual(d.duration, 45);
+    // a real billsec always wins
+    d = normalizeAcefonePayload({ ...dropped, billsec: "161" });
+    assert.strictEqual(d.duration, 161);
+    assert.strictEqual(d.durationSource, "billsec");
+    // never answered (no answer_stamp): stays 0, never invents talk time
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "", call_status: "missed" });
+    assert.strictEqual(d.duration, 0);
+    assert.strictEqual(d.durationSource, "billsec");
+    // end before answer, or no end stamp: ignored
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, end_stamp: "2026-10-22 16:22:00" }).duration, 0);
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, end_stamp: "" }).duration, 0);
+    // sub-second answered call still bills one second
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58.000Z", end_stamp: "2026-10-22T10:52:58.400Z" }).duration, 1);
+    console.log("acefone talk-time recovery tests passed");
+}
