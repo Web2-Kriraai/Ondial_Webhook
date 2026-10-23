@@ -42,6 +42,10 @@ async function ensureIndexes(database) {
         // Do not recreate bare mobileNumber_1 — Atlas redundant vs mobileNumber+campaignId compound (~58MB).
         database.collection("contactprocessings").createIndex({ updatedAt: -1 }),
         database.collection("contactprocessings").createIndex({ lead_id: 1, campaign_id: 1 }),
+        // Acefone answered/transfer callbacks find their contact by the call id the worker stamped before dialing.
+        database
+            .collection("contactprocessings")
+            .createIndex({ activeCallUniqueId: 1 }, { name: "activeCallUniqueId_sparse", sparse: true }),
         database.collection(process.env.ERRORLOG_COLLECTION || "ErrorLog").createIndex({ createdAt: -1 }),
         database
             .collection(process.env.ERRORLOG_COLLECTION || "ErrorLog")

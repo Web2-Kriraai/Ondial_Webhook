@@ -329,3 +329,27 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58.000Z", end_stamp: "2026-10-22T10:52:58.400Z" }).duration, 1);
     console.log("acefone talk-time recovery tests passed");
 }
+
+// Contact recovered from the call id the worker stamped on it (Redis mapping missing)
+(async () => {
+    const { resolveContactByActiveCall } = require("../lib/acefoneWebhook");
+    const calls = [];
+    const dbWith = (doc) => () => ({
+        collection: (name) => ({
+            findOne: async (filter, opts) => {
+                calls.push({ name, filter, opts });
+                return doc;
+            },
+        }),
+    });
+    const hit = await resolveContactByActiveCall(dbWith({ _id: "6adb0a5e1d3e268e32e1d9c3", campaignId: "6adb09afe01f06600dc4f9a3" }), "be1c5949-ebe3-4746-838e-26fa0bb7e16b");
+    assert.deepStrictEqual(hit, { contact_id: "6adb0a5e1d3e268e32e1d9c3", campaign_id: "6adb09afe01f06600dc4f9a3" });
+    assert.strictEqual(calls[0].name, "contactprocessings");
+    assert.deepStrictEqual(calls[0].filter, { activeCallUniqueId: "be1c5949-ebe3-4746-838e-26fa0bb7e16b" });
+    assert.deepStrictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), "x"), { contact_id: "c1", campaign_id: null });
+    assert.strictEqual(await resolveContactByActiveCall(dbWith(null), "x"), null);
+    assert.strictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), ""), null);
+    assert.strictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), undefined), null);
+    assert.strictEqual(await resolveContactByActiveCall(() => { throw new Error("db down"); }, "x"), null);
+    console.log("acefone active-call contact recovery tests passed");
+})().catch((e) => { console.error(e); process.exit(1); });
