@@ -223,3 +223,109 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(await resolveCampaignFromContact(() => { throw new Error("db down"); }, "6ad5f0e463029591472bb88e"), null);
     console.log("acefone contact->campaign resolution tests passed");
 })();
+
+// ---- AI-side transfer API body -> call.transfer event ----
+{
+    const { buildTransferEventPayload } = require("../lib/acefoneWebhook");
+    const min = buildTransferEventPayload({ call_unique_id: "9b564a3a304244478dc61eb44268c412", transfer_target: "+919313212890" });
+    assert(min.ok);
+    assert.strictEqual(min.payload.event, "call.transfer");
+    assert.strictEqual(min.payload.call.transferTarget, "+919313212890");
+    assert.strictEqual(min.payload.call.customParameters.call_unique_id, "9b564a3a-3042-4447-8dc6-1eb44268c412");
+    assert.strictEqual(min.payload.call.direction, "outbound");
+    assert(typeof min.payload.call.transferAt === "string" && !Number.isNaN(new Date(min.payload.call.transferAt).getTime()));
+    assert(!("contact_id" in min.payload.call.customParameters));
+    assert(!("transferReason" in min.payload.call));
+    const full = buildTransferEventPayload({
+        call_unique_id: "9b564a3a-3042-4447-8dc6-1eb44268c412", transfer_target: "919313212890",
+        transfer_at: "2026-10-22T14:05:09+05:30", reason: "user_requests_human",
+        to: "+919574661175", ref_id: "01a15374-a3b8-72bf-9c48-a35ab2684089", provider_call_id: "SRVINF-1", direction: "outbound",
+        contact_id: "c1", campaign_id: "k1",
+    });
+    assert(full.ok);
+    assert.strictEqual(full.payload.call.transferAt, "2026-10-22T08:35:09.000Z");
+    assert.strictEqual(full.payload.call.transferReason, "user_requests_human");
+    assert.strictEqual(full.payload.call.ref_id, "01a15374-a3b8-72bf-9c48-a35ab2684089");
+    assert.strictEqual(full.payload.call.customParameters.contact_id, "c1");
+    assert.strictEqual(buildTransferEventPayload({ transfer_target: "+919313212890" }).error, "call_unique_id_required");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u" }).error, "transfer_target_required");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", transfer_target: "12" }).error, "transfer_target_invalid");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", transfer_target: "1234567890123456" }).error, "transfer_target_invalid");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", transfer_target: "+919313212890", transfer_at: "nope" }).error, "transfer_at_invalid");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", transfer_target: "+919313212890", direction: "sideways" }).error, "direction_invalid");
+    // shape the handler's nested-provider path expects
+    assert(min.payload.event.includes(".") && typeof min.payload.call === "object");
+    console.log("acefone transfer-api tests passed");
+}
+
+// ---- transfer API accepts the AI service's own payload format ----
+{
+    const { buildTransferEventPayload } = require("../lib/acefoneWebhook");
+    const aiPayload = {
+        event: "call_transfer", status: "accepted", call_unique_id: "d31e02370bd7453ea0d3404c7bbc7e07",
+        ref_id: "01a15374-a3b8-72bf-9c48-a35ab2684089", provider_call_id: "SRVINF-BGN-SRV113-T9-1792401245.78631",
+        direction: "outbound", to: "+919574661175", target: "919313212890",
+        provider_message: "Transfer succeeded", http_status: 200, occurred_at: "2026-10-22T10:32:52Z",
+    };
+    const ok = buildTransferEventPayload(aiPayload);
+    assert(ok.ok && !ok.ignored);
+    assert.strictEqual(ok.payload.event, "call.transfer");
+    assert.strictEqual(ok.payload.call.transferTarget, "919313212890");
+    assert.strictEqual(ok.payload.call.transferAt, "2026-10-22T10:32:52.000Z");
+    assert.strictEqual(ok.payload.call.customParameters.call_unique_id, "d31e0237-0bd7-453e-a0d3-404c7bbc7e07");
+    assert.strictEqual(ok.payload.call.id, "SRVINF-BGN-SRV113-T9-1792401245.78631");
+    assert.strictEqual(ok.payload.call.to, "+919574661175");
+    assert.strictEqual(ok.payload.call.transferProviderMessage, "Transfer succeeded");
+    // no status at all behaves as accepted
+    const { status, ...noStatus } = aiPayload;
+    assert(buildTransferEventPayload(noStatus).ok);
+    // failed / skipped are acknowledged but NEVER produce a transfer event
+    for (const st of ["failed", "skipped"]) {
+        const r = buildTransferEventPayload({ ...aiPayload, status: st, reason: "acefone_rejected", provider_message: "Rejected", http_status: 400 });
+        assert(r.ok && r.ignored === true, st);
+        assert.strictEqual(r.status, st);
+        assert.strictEqual(r.reason, "acefone_rejected");
+        assert(!("payload" in r));
+    }
+    // a failed event needs no target, but still needs the call id
+    assert(buildTransferEventPayload({ call_unique_id: "u", status: "failed" }).ignored);
+    assert.strictEqual(buildTransferEventPayload({ status: "failed" }).error, "call_unique_id_required");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", status: "maybe", target: "919313212890" }).error, "status_invalid");
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", status: "ACCEPTED", target: "919313212890" }).ok, true);
+    assert.strictEqual(buildTransferEventPayload({ call_unique_id: "u", status: "accepted" }).error, "transfer_target_required");
+    console.log("acefone transfer-api AI-format tests passed");
+}
+
+// ---- talk time recovered from answer/end stamps when Acefone reports billsec 0 ----
+{
+    const dropped = {
+        uuid: "u", call_id: "SRVINF-1", call_to_number: "916352617754", caller_id_number: "8065990635",
+        billing_circle: "x", call_status: "answered", direction: "clicktocall",
+        start_stamp: "2026-10-22 16:22:40", answer_stamp: "2026-10-22 16:22:58", end_stamp: "2026-10-22 16:23:43",
+        billsec: "0", hangup_cause_key: "NETWORK_OUT_OF_ORDER", reason_key: "Calls dropped",
+        ref_id: "r", custom_identifier: { call_unique_id: "cbb09ee7f1b64e18af5a68ec25dcade8", contact_id: "c1" },
+    };
+    let d = normalizeAcefonePayload(dropped);
+    assert.strictEqual(d.duration, 45);
+    assert.strictEqual(d.durationSource, "answer_end_stamps");
+    assert.strictEqual(d.callStatus, "ANSWER");
+    // the zone does not matter: both stamps share it
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58Z", end_stamp: "2026-10-22T10:53:43Z" });
+    assert.strictEqual(d.duration, 45);
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "1792666378", end_stamp: "1792666423" }); // epoch seconds
+    assert.strictEqual(d.duration, 45);
+    // a real billsec always wins
+    d = normalizeAcefonePayload({ ...dropped, billsec: "161" });
+    assert.strictEqual(d.duration, 161);
+    assert.strictEqual(d.durationSource, "billsec");
+    // never answered (no answer_stamp): stays 0, never invents talk time
+    d = normalizeAcefonePayload({ ...dropped, answer_stamp: "", call_status: "missed" });
+    assert.strictEqual(d.duration, 0);
+    assert.strictEqual(d.durationSource, "billsec");
+    // end before answer, or no end stamp: ignored
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, end_stamp: "2026-10-22 16:22:00" }).duration, 0);
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, end_stamp: "" }).duration, 0);
+    // sub-second answered call still bills one second
+    assert.strictEqual(normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58.000Z", end_stamp: "2026-10-22T10:52:58.400Z" }).duration, 1);
+    console.log("acefone talk-time recovery tests passed");
+}
