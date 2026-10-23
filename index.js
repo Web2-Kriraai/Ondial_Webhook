@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact, resolveContactByActiveCall, buildTransferEventPayload } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact, resolveContactByActiveCall, shouldEmitAcefoneInitiated, buildTransferEventPayload } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -617,6 +617,20 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         campaign_id: campaignId || null,
         collection: collectionName,
     });
+
+    // Acefone has no call_initiated webhook (VoiceLink does), so the dashboard would hear nothing until the
+    // customer answers. The worker registers the mapping right as it places the call (pre-dial, no
+    // provider_call_id yet): push the same live update VoiceLink's call_initiated produces.
+    if (shouldEmitAcefoneInitiated(body)) {
+        emitCallUpdateSse({
+            campaign_id: campaignId || null,
+            call_id: callKey,
+            contact_id: contactId,
+            event: "call_initiated",
+            provider: "acefone",
+            direction: "outbound",
+        });
+    }
 });
 
 // ─── FLOW 2B: Twilio SID Mapping Endpoint ───────────────────────────────────
