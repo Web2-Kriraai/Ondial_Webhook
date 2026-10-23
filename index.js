@@ -32,7 +32,7 @@ const {
 const logger = require("./logger");
 const { subscribeCampaignDelta } = require("./lib/campaignDeltaRedisBus");
 const { emitCallUpdateSse } = require("./events");
-const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact, buildTransferEventPayload } = require("./lib/acefoneWebhook");
+const { isAcefonePayload, summarizeAcefone, buildAnsweredEventPayload, resolveConversationCallKey, applyRefIdMappingFallback, acefoneEventKey, resolveCampaignFromContact, resolveContactByActiveCall, shouldEmitAcefoneInitiated, buildTransferEventPayload } = require("./lib/acefoneWebhook");
 const { enqueueWebhook, startWebhookWorkers, closeWebhookWorkers, getQueueLagSnapshot } = require("./webhookQueue");
 const { enqueueAisensyInbound, closeAisensyInboundQueue } = require("./aisensyInboundQueue");
 const {
@@ -617,6 +617,20 @@ app.post("/api/outbound-call-mapping", async (req, res) => {
         campaign_id: campaignId || null,
         collection: collectionName,
     });
+
+    // Acefone has no call_initiated webhook (VoiceLink does), so the dashboard would hear nothing until the
+    // customer answers. The worker registers the mapping right as it places the call (pre-dial, no
+    // provider_call_id yet): push the same live update VoiceLink's call_initiated produces.
+    if (shouldEmitAcefoneInitiated(body)) {
+        emitCallUpdateSse({
+            campaign_id: campaignId || null,
+            call_id: callKey,
+            contact_id: contactId,
+            event: "call_initiated",
+            provider: "acefone",
+            direction: "outbound",
+        });
+    }
 });
 
 // ─── FLOW 2B: Twilio SID Mapping Endpoint ───────────────────────────────────
@@ -3137,6 +3151,19 @@ function makeAcefoneAiEventRoute({ tag, build, describe, eventId }) {
                 cp.contact_id = holder.contact_id;
                 if (holder.campaign_id) cp.campaign_id = holder.campaign_id;
                 logger.info(`[ACEFONE][${tag}] contact/campaign recovered from mapping stored under ref_id`, {
+                    call_unique_id: cp.call_unique_id,
+                    contact_id: cp.contact_id,
+                });
+            }
+        }
+        // Still nothing (worker mapping never reached Redis): the worker also stamps the call id on the contact
+        // in Mongo before dialing, so the live status and the call log still attach to the right contact.
+        if (!mapping?.contact_id && !cp.contact_id) {
+            const hit = await resolveContactByActiveCall(getDb, cp.call_unique_id);
+            if (hit) {
+                cp.contact_id = hit.contact_id;
+                if (hit.campaign_id) cp.campaign_id = hit.campaign_id;
+                logger.info(`[ACEFONE][${tag}] contact recovered from the call id stamped on the contact`, {
                     call_unique_id: cp.call_unique_id,
                     contact_id: cp.contact_id,
                 });

@@ -329,3 +329,58 @@ console.log("acefone answered-api ref_id/direction tests passed");
     assert.strictEqual(normalizeAcefonePayload({ ...dropped, answer_stamp: "2026-10-22T10:52:58.000Z", end_stamp: "2026-10-22T10:52:58.400Z" }).duration, 1);
     console.log("acefone talk-time recovery tests passed");
 }
+
+// Contact recovered from the call id the worker stamped on it (Redis mapping missing)
+(async () => {
+    const { resolveContactByActiveCall } = require("../lib/acefoneWebhook");
+    const calls = [];
+    const dbWith = (doc) => () => ({
+        collection: (name) => ({
+            findOne: async (filter, opts) => {
+                calls.push({ name, filter, opts });
+                return doc;
+            },
+        }),
+    });
+    const hit = await resolveContactByActiveCall(dbWith({ _id: "6adb0a5e1d3e268e32e1d9c3", campaignId: "6adb09afe01f06600dc4f9a3" }), "be1c5949-ebe3-4746-838e-26fa0bb7e16b");
+    assert.deepStrictEqual(hit, { contact_id: "6adb0a5e1d3e268e32e1d9c3", campaign_id: "6adb09afe01f06600dc4f9a3" });
+    assert.strictEqual(calls[0].name, "contactprocessings");
+    assert.deepStrictEqual(calls[0].filter, { activeCallUniqueId: "be1c5949-ebe3-4746-838e-26fa0bb7e16b" });
+    assert.deepStrictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), "x"), { contact_id: "c1", campaign_id: null });
+    assert.strictEqual(await resolveContactByActiveCall(dbWith(null), "x"), null);
+    assert.strictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), ""), null);
+    assert.strictEqual(await resolveContactByActiveCall(dbWith({ _id: "c1" }), undefined), null);
+    assert.strictEqual(await resolveContactByActiveCall(() => { throw new Error("db down"); }, "x"), null);
+    console.log("acefone active-call contact recovery tests passed");
+})().catch((e) => { console.error(e); process.exit(1); });
+
+// "Call placed" live update for Acefone (it has no call_initiated webhook of its own)
+(() => {
+    const { shouldEmitAcefoneInitiated } = require("../lib/acefoneWebhook");
+    const { normalizeCallUpdateSsePayload } = require("../events");
+    // pre-dial registration from the worker: announce
+    assert.strictEqual(shouldEmitAcefoneInitiated({ call_unique_id: "u", contact_id: "c", provider: "acefone" }), true);
+    assert.strictEqual(shouldEmitAcefoneInitiated({ provider: " Acefone " }), true);
+    // post-dial registration carries the provider call id: do not announce twice
+    assert.strictEqual(shouldEmitAcefoneInitiated({ provider: "acefone", provider_call_id: "01a1-xyz" }), false);
+    // VoiceLink / unknown provider / missing provider: unchanged, they get call_initiated from the carrier
+    assert.strictEqual(shouldEmitAcefoneInitiated({ call_unique_id: "u", contact_id: "c" }), false);
+    assert.strictEqual(shouldEmitAcefoneInitiated({ provider: "voicelink" }), false);
+    assert.strictEqual(shouldEmitAcefoneInitiated(null), false);
+    // wizard test calls are not shown on a campaign screen
+    assert.strictEqual(shouldEmitAcefoneInitiated({ provider: "acefone", is_test_call: true }), false);
+    assert.strictEqual(shouldEmitAcefoneInitiated({ provider: "acefone", is_test_call: "true" }), false);
+
+    // the event the dashboard receives: same kind VoiceLink's initiated produces, scoped to the campaign
+    const ev = normalizeCallUpdateSsePayload({
+        campaign_id: "6adb18721beb1b02754e6775",
+        call_id: "da703bdb-db3f-4d8a-bd31-6a3491da6c24",
+        contact_id: "6adb18c61beb1b02754e68b0",
+        event: "call_initiated",
+        provider: "acefone",
+        direction: "outbound",
+    });
+    assert.strictEqual(ev.event, "call_initiated");
+    assert.strictEqual(String(ev.campaignId || ev.campaign_id), "6adb18721beb1b02754e6775");
+    console.log("acefone call-placed SSE tests passed");
+})();
