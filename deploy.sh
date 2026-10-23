@@ -2,6 +2,17 @@
 # Zero-downtime API deploy: build dir → verify → switch → pm2 reload → live health.
 set -euo pipefail
 
+# One deploy at a time across all apps on this box: overlapping installs/builds were spiking CPU.
+exec 9>>/tmp/ondial-deploy.lock
+chmod 666 /tmp/ondial-deploy.lock 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  echo "Waiting for deploy lock (another app may be deploying)"
+  flock -w 1800 9 || { echo "Could not get deploy lock within 30 min"; exit 1; }
+fi
+# Install/build at lowest CPU/IO priority so the live apps on this box keep serving.
+LOW_PRI="nice -n 19"
+if command -v ionice >/dev/null 2>&1; then LOW_PRI="$LOW_PRI ionice -c3"; fi
+
 APP_NAME="ondial-webhook"
 TARGET_DIR="/var/www/html/Ondial-api"
 BUILD_DIR="/var/www/html/Ondial-api-build"
@@ -106,9 +117,9 @@ sudo chmod 600 "$BUILD_DIR/.env"
 sudo chown -R "$PM2_USER":"$PM2_USER" "$BUILD_DIR"
 
 if [ -f "$BUILD_DIR/package-lock.json" ]; then
-  sudo -u "$PM2_USER" -H bash -lc "cd '$BUILD_DIR' && npm ci"
+  sudo -u "$PM2_USER" -H bash -lc "cd '$BUILD_DIR' && $LOW_PRI npm ci"
 else
-  sudo -u "$PM2_USER" -H bash -lc "cd '$BUILD_DIR' && npm install"
+  sudo -u "$PM2_USER" -H bash -lc "cd '$BUILD_DIR' && $LOW_PRI npm install"
 fi
 
 echo "Health check 1 — build verify"
