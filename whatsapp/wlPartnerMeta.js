@@ -12,10 +12,12 @@ const { tryDecryptToken } = require("./tokenDecrypt");
  * Decrypted secrets live only in this process's memory and are never logged.
  */
 
-const SECRET_TTL_MS = 5 * 60 * 1000;
-const ROUTING_TTL_MS = 60 * 1000;
-// On a miss, reload at most this often (new partner set up a minute ago).
+// One in-memory snapshot of ALL WL partner numbers -> users / secrets / verify tokens.
+// Per-request lookups never query Mongo: an unknown phone_number_id is just a map miss.
+const SNAPSHOT_TTL_MS = 60 * 1000;
+// Reload on a miss (or after a failed load) at most this often, globally.
 const MISS_REFRESH_MIN_AGE_MS = 30 * 1000;
+const MAX_IDS_PER_PAYLOAD = 10;
 
 const PROFILE_PROJECTION = {
   _id: 1,
@@ -29,25 +31,17 @@ const PROFILE_PROJECTION = {
   "omniChannelSettings.whatsappProfiles.numberId": 1,
   "omniChannelSettings.whatsappProfiles.businessNumberId": 1,
   "omniChannelSettings.whatsappProfiles.wlWebhookAppSecret": 1,
+  "omniChannelSettings.whatsappProfiles.wlWebhookVerifyToken": 1,
 };
 
-const usersByNumberCache = new Map(); // pnid -> { at, users, secrets? }
-// Unsigned POSTs can carry arbitrary phone_number_ids; keep the cache bounded.
-const MAX_CACHED_NUMBERS = 2000;
-const MAX_IDS_PER_PAYLOAD = 10;
-
-function cacheUsers(pnid, entry) {
-  usersByNumberCache.delete(pnid);
-  usersByNumberCache.set(pnid, entry);
-  while (usersByNumberCache.size > MAX_CACHED_NUMBERS) {
-    usersByNumberCache.delete(usersByNumberCache.keys().next().value);
-  }
-}
-let verifyTokenCache = null; // { at, tokens }
+let snapshot = null; // { at, byNumber: Map<pnid, { users, secrets }>, verifyTokens: string[] }
+let lastAttemptAt = 0;
+let inflight = null;
 
 function resetWlPartnerMetaCaches() {
-  usersByNumberCache.clear();
-  verifyTokenCache = null;
+  snapshot = null;
+  lastAttemptAt = 0;
+  inflight = null;
 }
 
 /**
@@ -70,16 +64,19 @@ function findWhatsappProfile(user, profileId) {
 }
 
 function profileNumberIds(profile) {
-  return [profile?.businessNumberId, profile?.numberId]
+  return [...new Set([profile?.businessNumberId, profile?.numberId]
     .map((v) => String(v || "").trim())
-    .filter(Boolean);
+    .filter(Boolean))];
+}
+
+function isManagedWlMetaProfile(profile) {
+  if (!profile) return false;
+  if (String(profile.provider || "").trim().toLowerCase() !== "meta") return false;
+  return profile.usesPlatformAccount === false;
 }
 
 function isManagedWlMetaProfileFor(profile, phoneNumberId) {
-  if (!profile) return false;
-  if (String(profile.provider || "").trim().toLowerCase() !== "meta") return false;
-  if (profile.usesPlatformAccount !== false) return false;
-  return profileNumberIds(profile).includes(String(phoneNumberId));
+  return isManagedWlMetaProfile(profile) && profileNumberIds(profile).includes(String(phoneNumberId));
 }
 
 function hasWlTenant(user) {
@@ -87,149 +84,123 @@ function hasWlTenant(user) {
   return t != null && String(t).trim() !== "";
 }
 
-async function queryWlUsersByPhoneNumberId(db, phoneNumberId) {
-  const pnid = String(phoneNumberId);
+function decryptOrEmpty(enc) {
+  const v = String(enc || "").trim();
+  if (!v) return "";
+  const plain = tryDecryptToken(v);
+  return plain ? String(plain).trim() : "";
+}
+
+/** Single query: every WL user with a partner-managed Meta profile. */
+async function loadSnapshot(db, now) {
   const users = await db
     .collection("users")
     .find(
       {
         wlTenantId: { $exists: true, $nin: [null, ""] },
         "omniChannelSettings.whatsappProfiles": {
-          $elemMatch: {
-            provider: "meta",
-            usesPlatformAccount: false,
-            $or: [{ businessNumberId: pnid }, { numberId: pnid }],
-          },
+          $elemMatch: { provider: "meta", usesPlatformAccount: false },
         },
       },
       { projection: PROFILE_PROJECTION }
     )
     .toArray();
-  // Defensive re-check (the query is the source of truth, this guards odd shapes).
-  return users.filter(
-    (u) =>
-      hasWlTenant(u) &&
-      (u.omniChannelSettings?.whatsappProfiles || []).some((p) => isManagedWlMetaProfileFor(p, pnid))
-  );
-}
 
-/**
- * WL users sharing a partner phone_number_id. Cached (negative results too).
- */
-async function findWlUsersByPhoneNumberId(db, phoneNumberId, { ttlMs = ROUTING_TTL_MS, now = Date.now() } = {}) {
-  const pnid = String(phoneNumberId || "").trim();
-  if (!pnid) return [];
-  const cached = usersByNumberCache.get(pnid);
-  if (cached && now - cached.at < ttlMs) return cached.users;
-  const users = await queryWlUsersByPhoneNumberId(db, pnid);
-  cacheUsers(pnid, { at: now, users });
-  return users;
-}
-
-function decryptedSecretsFor(users, pnid) {
-  const out = new Set();
-  for (const user of users || []) {
+  const byNumber = new Map();
+  const verifyTokens = new Set();
+  for (const user of users) {
+    if (!hasWlTenant(user)) continue;
     for (const profile of user?.omniChannelSettings?.whatsappProfiles || []) {
-      if (!isManagedWlMetaProfileFor(profile, pnid)) continue;
-      const enc = String(profile.wlWebhookAppSecret || "").trim();
-      if (!enc) continue;
-      const plain = tryDecryptToken(enc);
-      if (plain && String(plain).trim()) out.add(String(plain).trim());
+      if (!isManagedWlMetaProfile(profile)) continue;
+      const token = decryptOrEmpty(profile.wlWebhookVerifyToken);
+      if (token) verifyTokens.add(token);
+      const secret = decryptOrEmpty(profile.wlWebhookAppSecret);
+      for (const pnid of profileNumberIds(profile)) {
+        let entry = byNumber.get(pnid);
+        if (!entry) {
+          entry = { users: [], secrets: new Set() };
+          byNumber.set(pnid, entry);
+        }
+        if (!entry.users.includes(user)) entry.users.push(user);
+        if (secret) entry.secrets.add(secret);
+      }
     }
   }
-  return [...out];
+  for (const entry of byNumber.values()) entry.secrets = [...entry.secrets];
+  return { at: now, byNumber, verifyTokens: [...verifyTokens] };
+}
+
+function reload(db, now) {
+  if (!inflight) {
+    lastAttemptAt = now;
+    inflight = loadSnapshot(db, now)
+      .then((snap) => {
+        snapshot = snap;
+        return snap;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+  }
+  return inflight;
 }
 
 /**
- * Candidate partner app secrets (decrypted) for the given phone_number_ids.
- * Decryption results are cached together with the user lookup (~5 min).
- *
- * refresh=true (used after a signature miss): drop cache entries older than 30s and
- * reload them; returns null when nothing was old enough to reload (rate limit).
+ * Current snapshot. Reloads when older than 60s (but never retries a failed load more
+ * than once per 30s). refresh=true (after a miss): reload only if the last attempt was
+ * at least 30s ago, globally; otherwise null (caller rejects as before).
+ */
+async function getWlPartnerSnapshot(db, { now = Date.now(), refresh = false } = {}) {
+  const canAttempt = now - lastAttemptAt >= MISS_REFRESH_MIN_AGE_MS;
+  if (refresh) {
+    if (!canAttempt) return null;
+    return reload(db, now);
+  }
+  if (inflight) return inflight;
+  if (snapshot && now - snapshot.at < SNAPSHOT_TTL_MS) return snapshot;
+  if (!canAttempt) return snapshot; // last load failed recently: serve stale (or null)
+  try {
+    return await reload(db, now);
+  } catch (err) {
+    if (snapshot) return snapshot;
+    throw err;
+  }
+}
+
+/** WL users sharing a partner phone_number_id (from the snapshot). */
+async function findWlUsersByPhoneNumberId(db, phoneNumberId, opts = {}) {
+  const pnid = String(phoneNumberId || "").trim();
+  if (!pnid) return [];
+  const snap = await getWlPartnerSnapshot(db, opts);
+  return snap?.byNumber.get(pnid)?.users || [];
+}
+
+/**
+ * Candidate partner app secrets (decrypted) for the payload's phone_number_ids.
+ * Returns null when refresh=true was rate-limited.
  */
 async function getPartnerAppSecretsForPhoneNumberIds(db, phoneNumberIds, { now = Date.now(), refresh = false } = {}) {
   const ids = [...new Set((phoneNumberIds || []).map((v) => String(v || "").trim()).filter((v) => /^\d{1,32}$/.test(v)))].slice(
     0,
     MAX_IDS_PER_PAYLOAD
   );
-  if (refresh) {
-    let dropped = false;
-    for (const pnid of ids) {
-      const cached = usersByNumberCache.get(pnid);
-      if (cached && now - cached.at >= MISS_REFRESH_MIN_AGE_MS) {
-        usersByNumberCache.delete(pnid);
-        dropped = true;
-      }
-    }
-    if (!dropped) return null;
-  }
+  if (!ids.length) return refresh ? null : [];
+  const snap = await getWlPartnerSnapshot(db, { now, refresh });
+  if (!snap) return refresh ? null : [];
   const secrets = new Set();
   for (const pnid of ids) {
-    const cached = usersByNumberCache.get(pnid);
-    let entry = cached && now - cached.at < SECRET_TTL_MS ? cached : null;
-    if (!entry) {
-      const users = await queryWlUsersByPhoneNumberId(db, pnid);
-      entry = { at: now, users };
-      cacheUsers(pnid, entry);
-    }
-    if (!entry.secrets) entry.secrets = decryptedSecretsFor(entry.users, pnid);
-    for (const s of entry.secrets) secrets.add(s);
+    for (const s of snap.byNumber.get(pnid)?.secrets || []) secrets.add(s);
   }
   return [...secrets];
 }
 
-async function queryPartnerVerifyTokens(db) {
-  const users = await db
-    .collection("users")
-    .find(
-      {
-        wlTenantId: { $exists: true, $nin: [null, ""] },
-        "omniChannelSettings.whatsappProfiles": {
-          $elemMatch: {
-            provider: "meta",
-            usesPlatformAccount: false,
-            wlWebhookVerifyToken: { $exists: true, $nin: [null, ""] },
-          },
-        },
-      },
-      {
-        projection: {
-          _id: 1,
-          wlTenantId: 1,
-          "omniChannelSettings.whatsappProfiles.provider": 1,
-          "omniChannelSettings.whatsappProfiles.usesPlatformAccount": 1,
-          "omniChannelSettings.whatsappProfiles.wlWebhookVerifyToken": 1,
-        },
-      }
-    )
-    .toArray();
-  const out = new Set();
-  for (const user of users) {
-    if (!hasWlTenant(user)) continue;
-    for (const p of user?.omniChannelSettings?.whatsappProfiles || []) {
-      if (String(p?.provider || "").toLowerCase() !== "meta" || p?.usesPlatformAccount !== false) continue;
-      const enc = String(p?.wlWebhookVerifyToken || "").trim();
-      if (!enc) continue;
-      const plain = tryDecryptToken(enc);
-      if (plain && String(plain).trim()) out.add(String(plain).trim());
-    }
-  }
-  return [...out];
-}
-
 /**
- * All decrypted partner verify tokens (cached ~5 min).
- * refresh=true (after a miss): reload if the cache is at least 30s old, else null.
+ * All decrypted partner verify tokens. Returns null when refresh=true was rate-limited.
  */
 async function getPartnerVerifyTokens(db, { now = Date.now(), refresh = false } = {}) {
-  const fresh = verifyTokenCache && now - verifyTokenCache.at < SECRET_TTL_MS;
-  if (refresh) {
-    if (verifyTokenCache && now - verifyTokenCache.at < MISS_REFRESH_MIN_AGE_MS) return null;
-  } else if (fresh) {
-    return verifyTokenCache.tokens;
-  }
-  verifyTokenCache = { at: now, tokens: await queryPartnerVerifyTokens(db) };
-  return verifyTokenCache.tokens;
+  const snap = await getWlPartnerSnapshot(db, { now, refresh });
+  if (!snap) return refresh ? null : [];
+  return snap.verifyTokens;
 }
 
 function idForms(value) {
@@ -290,7 +261,8 @@ module.exports = {
   getPartnerAppSecretsForPhoneNumberIds,
   getPartnerVerifyTokens,
   resolveWlRoutingScope,
+  getWlPartnerSnapshot,
   resetWlPartnerMetaCaches,
-  SECRET_TTL_MS,
-  ROUTING_TTL_MS,
+  SNAPSHOT_TTL_MS,
+  MISS_REFRESH_MIN_AGE_MS,
 };

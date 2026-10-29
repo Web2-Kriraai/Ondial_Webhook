@@ -283,7 +283,34 @@ test("missing env secret: 503 unless a partner secret matches", async () => {
     assert.strictEqual(partner.ok, true);
 });
 
-test("secrets cached per phone_number_id; a miss reloads at most every 30s", async () => {
+test("flood of random phone_number_ids with forged signatures: bounded DB calls", async () => {
+    const db = fakeDb({ users: [customerA] });
+    const realNow = Date.now;
+    let clock = 5_000_000;
+    Date.now = () => clock;
+    try {
+        for (let i = 0; i < 1000; i++) {
+            clock += 60; // 1000 requests over 60s
+            const payload = partnerPayload(String(100000000 + Math.floor(Math.random() * 1e9)));
+            const body = JSON.stringify(payload);
+            const r = await authorizeMetaWebhookPost({
+                rawBody: Buffer.from(body),
+                signature: sign(body, "forged"),
+                envSecret: ONDIAL_SECRET,
+                payload,
+                ...loaders(db),
+            });
+            assert.strictEqual(r.status, 401);
+        }
+    } finally {
+        Date.now = realNow;
+    }
+    const userQueries = db.calls.filter((c) => c.name === "users").length;
+    // initial load + at most one miss-reload per 30s over 60s
+    assert.ok(userQueries <= 3, `expected <=3 users queries, got ${userQueries}`);
+});
+
+test("new partner secret accepted within ~60s; reloads are global and rate-limited", async () => {
     const users = [];
     const db = fakeDb({ users });
     const t0 = 1_000_000;
@@ -292,20 +319,35 @@ test("secrets cached per phone_number_id; a miss reloads at most every 30s", asy
     assert.deepStrictEqual(
         await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 + 1000 }),
         [],
-        "cached negative"
+        "snapshot still fresh"
     );
     assert.strictEqual(
         await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 + 1000, refresh: true }),
         null,
-        "refresh rate-limited"
+        "miss reload rate-limited (30s, global)"
     );
     assert.deepStrictEqual(
         await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 + 31_000, refresh: true }),
-        [PARTNER_SECRET]
+        [PARTNER_SECRET],
+        "miss reload after 30s picks up the new secret"
     );
     const before = db.calls.length;
-    await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 + 60_000 });
-    assert.strictEqual(db.calls.length, before, "served from cache");
+    await wl.getPartnerAppSecretsForPhoneNumberIds(db, ["123", PARTNER_PNID], { now: t0 + 60_000 });
+    assert.strictEqual(db.calls.length, before, "served from snapshot; unknown id costs nothing");
+
+    // Rotated secret, no miss-reload: periodic 60s refresh picks it up.
+    wl.resetWlPartnerMetaCaches();
+    users.length = 0;
+    users.push(customerA);
+    await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 });
+    users[0] = {
+        ...customerA,
+        omniChannelSettings: { whatsappProfiles: [wlProfile({ wlWebhookAppSecret: encrypt("rotated") })] },
+    };
+    assert.deepStrictEqual(
+        await wl.getPartnerAppSecretsForPhoneNumberIds(db, [PARTNER_PNID], { now: t0 + 61_000 }),
+        ["rotated"]
+    );
 });
 
 test("extractMetaPhoneNumberIds dedupes", () => {
