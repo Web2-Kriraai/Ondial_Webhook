@@ -33,7 +33,9 @@ async function sendWhatsappSessionReply(db, {
   const alreadyBilled =
     payer &&
     (await hasBilledWhatsappSessionInWindow(db, { user: payer, contactId, phone }));
-  const cost = alreadyBilled ? 0 : await getWhatsappSendCost(db, usesPlatform, "session");
+  const cost = alreadyBilled
+    ? 0
+    : await getWhatsappSendCost(db, usesPlatform, "session", { payer, user }); // WL-HOOK:wl-whatsapp-price
   if (cost > 0 && (Number(payer?.credits) || 0) < cost) {
     return { success: false, error: "insufficient_credits" };
   }

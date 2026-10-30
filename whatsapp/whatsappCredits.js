@@ -204,7 +204,64 @@ async function deductWhatsappCredits(db, {
   return { ok: true, amount, balanceAfter };
 }
 
-async function getWhatsappSendCost(db, usesPlatformAccount, kind) {
+// WL-HOOK:wl-whatsapp-price — white-label customers pay their PARTNER's WhatsApp price per
+// message instead of OnDial's global `whatsapp_pricing` rate (same rule as Calling_system1
+// scheduler-service/whatsapp/whatsappCredits.js). The partner sets it in Ondial-Super-Admin
+// ("Pricing & margin"); stored on wl_tenants.billing.whatsappPricing
+// { templateMessageCredits, sessionMessageCredits } (credits = USD; absent / null / 0 = free).
+// A user is a white-label customer when its `users` document carries wlTenantId (the paying
+// wallet's, else the campaign owner's). Cached per tenant for WL_PRICE_TTL_MS. Native users
+// (no wlTenantId) keep the global rate exactly as before.
+const WL_PRICE_TTL_MS = 60 * 1000;
+const wlPriceCache = new Map(); // tenantId -> { at, prices }
+
+function __resetWlWhatsappPriceCache() {
+  wlPriceCache.clear();
+}
+
+/** wlTenantId of the first user carrying one (paying wallet first), or null for native users. */
+function wlTenantIdOf(...users) {
+  for (const u of users) {
+    const id = u?.wlTenantId;
+    if (id) return String(id);
+  }
+  return null;
+}
+
+function cleanWlPrice(v) {
+  const n = Number(v);
+  return v != null && Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** { templateMessageCredits, sessionMessageCredits } of one partner (0 = free). */
+async function loadWlWhatsappPricing(db, tenantId, { now = Date.now() } = {}) {
+  const key = String(tenantId);
+  const hit = wlPriceCache.get(key);
+  if (hit && now - hit.at < WL_PRICE_TTL_MS) return hit.prices;
+  if (!/^[a-f0-9]{24}$/i.test(key)) return { templateMessageCredits: 0, sessionMessageCredits: 0 };
+  const tenant = await db
+    .collection("wl_tenants")
+    .findOne({ _id: new ObjectId(key) }, { projection: { "billing.whatsappPricing": 1 } });
+  const w = tenant?.billing?.whatsappPricing || {};
+  const prices = {
+    templateMessageCredits: cleanWlPrice(w.templateMessageCredits),
+    sessionMessageCredits: cleanWlPrice(w.sessionMessageCredits),
+  };
+  wlPriceCache.set(key, { at: now, prices });
+  return prices;
+}
+
+/**
+ * Credits for one WhatsApp message.
+ * @param {{ payer?: object, user?: object }} [who] — paying wallet and campaign owner; a
+ *   white-label customer pays its partner's price (WL-HOOK:wl-whatsapp-price).
+ */
+async function getWhatsappSendCost(db, usesPlatformAccount, kind, { payer = null, user = null } = {}) {
+  const wlTenantId = wlTenantIdOf(payer, user); // WL-HOOK:wl-whatsapp-price
+  if (wlTenantId) {
+    const prices = await loadWlWhatsappPricing(db, wlTenantId);
+    return kind === "session" ? prices.sessionMessageCredits : prices.templateMessageCredits;
+  }
   const pricing = await loadWhatsappPricing(db);
   if (!pricing.enabled) return 0;
   return resolveRate(pricing, usesPlatformAccount, kind);
@@ -215,4 +272,7 @@ module.exports = {
   getWhatsappSendCost,
   hasBilledWhatsappSessionInWindow,
   SESSION_BILLING_WINDOW_MS,
+  loadWlWhatsappPricing,
+  wlTenantIdOf,
+  __resetWlWhatsappPriceCache,
 };
