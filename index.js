@@ -46,7 +46,11 @@ const {
     getMetaWhatsappInboundWorkerHealth,
 } = require("./whatsapp/metaInboundWorker");
 const { verifyAisensySignature } = require("./lib/aisensySignature");
-const { verifyMetaWhatsappSignature } = require("./lib/metaWhatsappSignature");
+const { authorizeMetaWebhookPost, authorizeMetaWebhookVerify } = require("./lib/metaWebhookAuth");
+const {
+    getPartnerAppSecretsForPhoneNumberIds,
+    getPartnerVerifyTokens,
+} = require("./whatsapp/wlPartnerMeta");
 const {
     summarizeMetaWhatsappPayload,
     shouldLogMetaWebhook,
@@ -3383,7 +3387,7 @@ app.post("/api/webhook/aisensy", async (req, res) => {
  *   Test: https://dev-api.ondial.ai/api/webhook/whatsapp
  * GET: hub.verify_token challenge. POST: X-Hub-Signature-256 → BullMQ whatsapp-meta-inbound.
  */
-app.get("/api/webhook/whatsapp", (req, res) => {
+app.get("/api/webhook/whatsapp", async (req, res) => {
     const mode = String(req.query["hub.mode"] || "").trim();
     const token = String(req.query["hub.verify_token"] || "").trim();
     const challenge = req.query["hub.challenge"];
@@ -3392,31 +3396,61 @@ app.get("/api/webhook/whatsapp", (req, res) => {
     if (mode !== "subscribe") {
         return res.status(400).send("Invalid mode");
     }
-    if (!expected) {
+    // OnDial env token first (unchanged); then white-label partner verify tokens.
+    const auth = await authorizeMetaWebhookVerify({
+        token,
+        envToken: expected,
+        loadPartnerVerifyTokens: async (opts) => {
+            try {
+                return await getPartnerVerifyTokens(getDb(), opts);
+            } catch (err) {
+                logger.error("[MetaWhatsApp] partner verify-token lookup failed", { error: err.message });
+                return [];
+            }
+        },
+    });
+    if (auth.ok) {
+        logger.info(`[MetaWhatsApp] Verification passed via ${auth.via === "partner" ? "white-label partner" : "env"} token`);
+        return res.status(200).send(String(challenge ?? ""));
+    }
+    if (auth.status === 503) {
         logger.error("[MetaWhatsApp] WHATSAPP_WEBHOOK_VERIFY_TOKEN is not configured");
         return res.status(503).send("Webhook verify token not configured");
     }
-    if (token !== expected) {
-        logger.error("[MetaWhatsApp] Verification FAILED (token mismatch; token not logged)");
-        return res.status(403).send("Forbidden");
-    }
-    logger.info("[MetaWhatsApp] Verification passed via env token");
-    return res.status(200).send(String(challenge ?? ""));
+    logger.error("[MetaWhatsApp] Verification FAILED (token mismatch; token not logged)");
+    return res.status(403).send("Forbidden");
 });
 
 app.post("/api/webhook/whatsapp", async (req, res) => {
     const startedAt = Date.now();
     const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
-    if (!appSecret) {
-        logger.error("[MetaWhatsApp] WHATSAPP_APP_SECRET is not configured — rejecting POST");
-        return res.status(503).json({ error: "Webhook not configured" });
-    }
-
     const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
     const signature =
         req.headers["x-hub-signature-256"] || req.headers["X-Hub-Signature-256"];
 
-    if (!verifyMetaWhatsappSignature(rawBody, signature, appSecret)) {
+    // OnDial app secret first (unchanged); on miss, white-label partner app secrets
+    // for the payload's phone_number_id(s). HMAC is always over the raw body.
+    const auth = await authorizeMetaWebhookPost({
+        rawBody,
+        signature,
+        envSecret: appSecret,
+        payload: req.body,
+        loadPartnerSecrets: async (ids, opts) => {
+            try {
+                return await getPartnerAppSecretsForPhoneNumberIds(getDb(), ids, opts);
+            } catch (err) {
+                logger.error("[MetaWhatsApp] partner secret lookup failed", { error: err.message });
+                return [];
+            }
+        },
+    });
+
+    if (!auth.ok && auth.status === 503) {
+        logger.error("[MetaWhatsApp] WHATSAPP_APP_SECRET is not configured — rejecting POST");
+        return res.status(503).json({ error: "Webhook not configured" });
+    }
+
+    if (!auth.ok) {
         logger.error("[MetaWhatsApp] Invalid X-Hub-Signature-256", {
             hasSignature: Boolean(signature),
             contentLength: rawBody?.length || 0,
@@ -3446,6 +3480,7 @@ app.post("/api/webhook/whatsapp", async (req, res) => {
             signaturePresent: Boolean(signature),
             sourceIp: req.ip,
             fields: summary.fields,
+            ...(auth.via === "partner" ? { signatureVia: "wl_partner" } : {}),
         });
         if (shouldLogMetaWebhook(summary)) {
             const ingressLog = metaWebhookIngressLog(summary, {

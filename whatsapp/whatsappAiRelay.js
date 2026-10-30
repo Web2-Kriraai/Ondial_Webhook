@@ -20,6 +20,8 @@ const {
   isWhatsappConversationWindowOpen,
 } = require("./whatsappFollowupService");
 
+const { findWhatsappProfile, resolveWlRoutingScope } = require("./wlPartnerMeta");
+
 const AI_TIMEOUT_MS = 30_000;
 
 function phoneVariants(phone) {
@@ -29,22 +31,6 @@ function phoneVariants(phone) {
     set.add(normalized.slice(2));
   }
   return [...set];
-}
-
-function findWhatsappProfile(user, profileId) {
-  const profiles = user?.omniChannelSettings?.whatsappProfiles || [];
-  const id = String(profileId || "").trim();
-  if (id) {
-    const match = profiles.find((p) => String(p._id) === id);
-    if (match) return match;
-  }
-  return (
-    profiles.find((p) => p.isDefault && p.verified) ||
-    profiles.find((p) => p.usesPlatformAccount) ||
-    profiles.find((p) => p.verified) ||
-    profiles[0] ||
-    null
-  );
 }
 
 function toObjectIdOrNull(value) {
@@ -113,6 +99,39 @@ async function findContactsForPhone(db, phoneNorm) {
     .sort({ lastWhatsappSentAt: -1, updatedAt: -1 })
     .limit(25)
     .toArray();
+}
+
+/**
+ * White-label partner number: many customers share one phone_number_id, so only
+ * contacts in campaigns of the WL users that send from that number are candidates.
+ */
+async function findContactsForPhoneInCampaigns(db, phoneNorm, campaignIds) {
+  if (!Array.isArray(campaignIds) || !campaignIds.length) return [];
+  const variants = phoneVariants(phoneNorm);
+  return db
+    .collection("contactprocessings")
+    .find({
+      $or: variants.map((mobileNumber) => ({ mobileNumber })),
+      campaignId: { $in: campaignIds },
+    })
+    .sort({ lastWhatsappSentAt: -1, updatedAt: -1 })
+    .limit(25)
+    .toArray();
+}
+
+/**
+ * Candidate contacts for an inbound message.
+ * Native (OnDial / non-WL numbers): unchanged phone-only lookup.
+ * WL partner number: scoped to that partner's customers; `wlUnattributed` when none of
+ * them has history with this wa_id (never handed to an arbitrary customer).
+ */
+async function findInboundCandidateContacts(db, phoneNorm, phoneNumberId) {
+  const scope = phoneNumberId ? await resolveWlRoutingScope(db, phoneNumberId) : null;
+  if (!scope) {
+    return { contacts: await findContactsForPhone(db, phoneNorm), wlScope: null };
+  }
+  const contacts = await findContactsForPhoneInCampaigns(db, phoneNorm, scope.campaignIds);
+  return { contacts, wlScope: scope, wlUnattributed: contacts.length === 0 };
 }
 
 /**
@@ -479,7 +498,20 @@ async function relayInboundWhatsAppMessage(db, {
     return { handled: false, reason: "empty" };
   }
 
-  const contacts = await findContactsForPhone(db, phoneNorm);
+  const { contacts, wlScope, wlUnattributed } = await findInboundCandidateContacts(
+    db,
+    phoneNorm,
+    phoneNumberId
+  );
+  if (wlUnattributed) {
+    logger.warn("[WhatsApp] inbound dropped — white-label number, no customer history for sender", {
+      phone: phoneNorm,
+      phoneNumberId,
+      wlUsers: wlScope?.userCount || 0,
+      messageId: messageId || null,
+    });
+    return { handled: false, reason: "wl_unattributed" };
+  }
   const latestOpenSession = await findLatestOpenSessionByPhone(db, phoneNorm);
   const contact = pickFollowupContact(contacts, latestOpenSession);
   let existingSession = null;
@@ -817,6 +849,7 @@ async function relayInboundWhatsAppMessage(db, {
 
 module.exports = {
   relayInboundWhatsAppMessage,
+  findInboundCandidateContacts,
   buildWhatsappAiReplyPayload,
   pickFollowupContact,
   isFollowupSessionActive,
